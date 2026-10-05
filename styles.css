@@ -1,0 +1,115 @@
+:root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --bg2: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --accent: var(--tg-theme-button-color, #e0567a);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --link: var(--tg-theme-link-color, #e0567a);
+    --ok: #34c759;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: var(--tg-theme-bg-color, #17181c);
+        --bg2: var(--tg-theme-secondary-bg-color, #24262c);
+        --text: var(--tg-theme-text-color, #f2f2f2);
+        --hint: var(--tg-theme-hint-color, #8d9099);
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+}
+
+main {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 16px 16px 96px;
+}
+
+h1 { font-size: 24px; margin: 4px 0 4px; }
+h2 { font-size: 18px; margin: 24px 0 10px; }
+p { line-height: 1.45; }
+.hint { color: var(--hint); font-size: 14px; margin: 0 0 16px; }
+
+/* Статистика */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0; }
+.stat { background: var(--bg2); border-radius: 14px; padding: 12px 6px; text-align: center; }
+.stat-value { font-size: 20px; font-weight: 700; }
+.stat-label { font-size: 12px; color: var(--hint); margin-top: 2px; }
+
+/* Карточки и строки списков */
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tile, .row {
+    display: flex; align-items: center; gap: 12px;
+    width: 100%; border: 0; text-align: left; font: inherit; color: inherit;
+    background: var(--bg2); border-radius: 14px; padding: 14px; cursor: pointer;
+}
+.tile { flex-direction: column; align-items: flex-start; min-height: 96px; }
+.tile-emoji, .row-emoji { font-size: 26px; line-height: 1; }
+.tile-title { font-weight: 600; }
+.tile-sub, .row-sub { font-size: 13px; color: var(--hint); }
+.list { display: flex; flex-direction: column; gap: 8px; }
+.row-body { flex: 1; min-width: 0; }
+.row-title { font-weight: 500; }
+.row-arrow { color: var(--hint); font-size: 20px; }
+.check {
+    flex: none; width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 14px;
+    background: var(--bg); color: var(--hint);
+}
+.check.done { background: var(--ok); color: #fff; }
+
+/* Упражнение */
+.progress { height: 6px; background: var(--bg2); border-radius: 3px; overflow: hidden; margin: 8px 0 20px; }
+.progress > div { height: 100%; background: var(--accent); transition: width .25s; }
+.sets { display: inline-block; background: var(--bg2); border-radius: 10px; padding: 6px 12px; font-weight: 600; margin-bottom: 12px; }
+.description { white-space: pre-line; }
+video { width: 100%; border-radius: 14px; background: #000; margin: 8px 0; }
+
+.btn {
+    display: block; width: 100%; border: 0; border-radius: 12px; padding: 14px;
+    font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: var(--accent-text); margin-top: 10px;
+}
+.btn.secondary { background: var(--bg2); color: var(--link); }
+.link { background: none; border: 0; color: var(--link); font: inherit; padding: 8px 0; cursor: pointer; }
+
+/* Финиш */
+.finish { text-align: center; padding-top: 32px; }
+.finish-emoji { font-size: 72px; }
+
+/* Вес */
+.weight-form { display: flex; gap: 8px; }
+.weight-form input {
+    flex: 1; min-width: 0; font: inherit; font-size: 18px; padding: 12px 14px;
+    border-radius: 12px; border: 1px solid var(--bg2); background: var(--bg2); color: var(--text);
+}
+.weight-form .btn { width: auto; margin: 0; padding: 12px 18px; }
+.card { background: var(--bg2); border-radius: 14px; padding: 12px; margin-top: 16px; }
+.history-row { display: flex; justify-content: space-between; padding: 10px 2px; border-bottom: 1px solid var(--bg); }
+.history-row:last-child { border-bottom: 0; }
+.message { color: var(--hint); text-align: center; padding: 24px 8px; }
+
+/* Кнопки вне Telegram (в Telegram используются его собственные) */
+.page-back {
+    position: sticky; top: 0; z-index: 2; display: block;
+    border: 0; background: var(--bg); color: var(--link); font: inherit; font-size: 17px;
+    padding: 12px 16px; width: 100%; text-align: left; cursor: pointer;
+}
+.page-main {
+    position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    background: var(--bg);
+}
+.page-main button {
+    display: block; width: 100%; max-width: 528px; margin: 0 auto; border: 0; border-radius: 12px;
+    padding: 15px; font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-text); cursor: pointer;
+}
+[hidden] { display: none !important; }
