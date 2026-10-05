@@ -60,6 +60,7 @@ function rowsFor_(userId) {
     .map(r => Object.fromEntries(headers.map((h, i) => [h, r[i]])))
     .filter(r => String(r.telegram_id) === String(userId))
     .map(r => ({
+      telegram_id: String(r.telegram_id),
       date: r.date instanceof Date ? r.date.toISOString() : r.date,
       weight: r.weight
     }));
