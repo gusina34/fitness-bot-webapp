@@ -14,7 +14,7 @@
 window.APP_DATA = {
   config: {
     // Ссылка /exec на Google Apps Script (см. apps-script/Code.gs). Пусто = дневник веса выключен.
-    googleScriptUrl: '',
+    googleScriptUrl: 'https://script.google.com/macros/s/AKfycbyODd7uBZmFT_vgdv8zNs69N2OnTvvxgkqx9klttUmG3w2Rw7lZitM3YlU-cZnD6xjh/exec',
     // Куда ведёт кнопка «Написать тренеру»
     coachLink: 'https://t.me/shapovalovaNi'
   },
