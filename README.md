@@ -30,6 +30,8 @@
 2. Можно сделать Mini App основным приложением бота: @BotFather → `/mybots` → бот → Bot Settings →
    Configure Mini App. Тогда ссылки вида `https://t.me/Nina_fitbody_bot/app?startapp=weight`
    будут открывать сразу дневник веса, а `?startapp=gym-1` — нужную тренировку.
+3. Кнопка Web App с адресом `https://gusina34.github.io/fitness-bot-webapp/?open=weight` откроет сразу
+   дневник веса, `?open=gym-1` — тренировку «Зал, день 1».
 
 ## Дневник веса
 

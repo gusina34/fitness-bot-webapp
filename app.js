@@ -460,8 +460,9 @@ function renderWeights(entries) {
 // ---------- Старт ----------
 
 loadProgress().then(() => {
-    // Ссылка вида t.me/Nina_fitbody_bot/app?startapp=weight откроет сразу дневник веса
-    const start = inTelegram && tg.initDataUnsafe.start_param;
+    // Сразу открыть нужный экран: адрес кнопки ...fitness-bot-webapp/?open=weight
+    // или ссылка t.me/Nina_fitbody_bot/app?startapp=weight
+    const start = new URLSearchParams(location.search).get('open') || (inTelegram && tg.initDataUnsafe.start_param);
     home();
     if (start === 'weight') go('weight');
     else if (start && WORKOUTS[start]) go('workout', { id: start });
