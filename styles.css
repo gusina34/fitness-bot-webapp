@@ -132,3 +132,11 @@ video { width: 100%; border-radius: 14px; background: #000; margin: 8px 0; }
     background: var(--accent); color: var(--accent-text);
 }
 .banner-sub { font-size: 13px; opacity: .85; }
+
+/* Рекорды */
+.record-hint {
+    margin: 4px 0 8px; padding: 10px 12px; border-radius: 10px; font-weight: 600;
+    background: #ffd60a33; color: var(--text);
+}
+.records .row-title { margin-bottom: 4px; }
+.history-sets { color: var(--hint); text-align: right; margin-left: 12px; }

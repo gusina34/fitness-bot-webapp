@@ -94,16 +94,77 @@ async function api(method, params = {}) {
 const session = {};
 const loggedKeys = new Set();
 let loggedSetsCount = 0;
-// Последняя запись по каждому упражнению: name → { date, sets: [{ weight, reps }] }
-let exerciseHistory = {};
-let historyRequest = null;
+// Вся история по упражнениям: name → [{ date, sets: [{ weight, reps }] }], от старых к новым
+let exerciseLog = {};
+let logRequest = null;
+let logLoaded = false;
+let newRecords = []; // рекорды текущей тренировки: [{ exercise, text }]
 
-function loadExerciseHistory() {
-    if (!apiEnabled || historyRequest) return historyRequest;
-    historyRequest = api('GET', { action: 'history' })
-        .then(data => { exerciseHistory = { ...data, ...exerciseHistory }; })
-        .catch(error => { console.error('История упражнений:', error); historyRequest = null; });
-    return historyRequest;
+function loadExerciseLog() {
+    if (!apiEnabled) return Promise.resolve();
+    if (logRequest) return logRequest;
+    logRequest = api('GET', { action: 'progress' })
+        .then(data => {
+            if (!Array.isArray(data)) return data;
+            // Старая версия скрипта не знает action=progress — берём хотя бы последние тренировки
+            return api('GET', { action: 'history' }).then(last => Array.isArray(last) ? {} :
+                Object.fromEntries(Object.entries(last).map(([name, session]) => [name, [session]])));
+        })
+        .then(data => {
+            const local = exerciseLog;
+            exerciseLog = data;
+            // Добавляем то, что записано в этой сессии или ещё не дошло до таблицы
+            Object.entries(local).forEach(([exercise, list]) => list.forEach(s => addToLog({ exercise, ...s })));
+            readPending().forEach(addToLog);
+            logLoaded = true;
+        })
+        .catch(error => { console.error('История упражнений:', error); logRequest = null; });
+    return logRequest;
+}
+
+function addToLog({ exercise, date, sets }) {
+    const list = exerciseLog[exercise] || (exerciseLog[exercise] = []);
+    const time = new Date(date).getTime();
+    if (list.some(s => Math.abs(new Date(s.date).getTime() - time) < 2000)) return;
+    list.push({ date, sets });
+    list.sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+
+function lastSession(name) {
+    const list = exerciseLog[name];
+    return list && list.length ? list[list.length - 1] : null;
+}
+
+// Лучший подход тренировки: максимальный вес (при равном — больше повторов), без веса — максимум повторов
+function sessionBest(sets) {
+    const weighted = sets.filter(s => s.weight !== '' && Number(s.weight) > 0);
+    if (weighted.length) {
+        const best = weighted.reduce((a, b) => (Number(b.weight) > Number(a.weight) ||
+            (Number(b.weight) === Number(a.weight) && Number(b.reps) > Number(a.reps)) ? b : a));
+        return { byWeight: true, value: Number(best.weight), reps: best.reps };
+    }
+    const reps = Math.max(0, ...sets.map(s => Number(s.reps) || 0));
+    return reps ? { byWeight: false, value: reps } : null;
+}
+
+function bestText(best) {
+    if (!best) return '—';
+    return best.byWeight
+        ? `${formatKg(best.value)} кг${best.reps !== '' && best.reps !== undefined ? ' × ' + best.reps : ''}`
+        : `${best.value} ${plural(best.value, 'повтор', 'повтора', 'повторов')}`;
+}
+
+// Рекорд по упражнению. Если хоть раз записан вес — сравниваем по весу, иначе по повторам
+function personalRecord(list) {
+    const bests = (list || []).map(s => sessionBest(s.sets)).filter(Boolean);
+    const byWeight = bests.some(b => b.byWeight);
+    return bests.filter(b => b.byWeight === byWeight).reduce((a, b) => (!a || b.value > a.value ? b : a), null);
+}
+
+function isNewRecord(name, sets) {
+    const record = personalRecord(exerciseLog[name]);
+    const current = sessionBest(sets);
+    return record && current && current.byWeight === record.byWeight && current.value > record.value ? record : null;
 }
 
 // "4 × 12" → { sets: 4, reps: '12' }
@@ -159,13 +220,10 @@ function logExercise(workout, index) {
     loggedKeys.add(key);
     loggedSetsCount += sets.length;
     const exercise = workout.exercises[index].name;
-    exerciseHistory[exercise] = { date: new Date().toISOString(), sets };
-    writePending(readPending().concat({
-        date: new Date().toISOString(),
-        workout: `${workout.program.title}, ${workout.title}`,
-        exercise,
-        sets
-    }));
+    if (isNewRecord(exercise, sets)) newRecords.push({ exercise, text: bestText(sessionBest(sets)) });
+    const entry = { date: new Date().toISOString(), workout: `${workout.program.title}, ${workout.title}`, exercise, sets };
+    addToLog(entry);
+    writePending(readPending().concat(entry));
     flushLogs();
 }
 
@@ -175,6 +233,7 @@ function clearSession(workout) {
         loggedKeys.delete(k);
     });
     loggedSetsCount = 0;
+    newRecords = [];
 }
 
 function markDone(workoutId) {
@@ -332,6 +391,7 @@ app.addEventListener('input', event => {
     const { screen, params } = stack[stack.length - 1];
     if (screen !== 'exercise') return;
     sessionSets(WORKOUTS[params.id], params.index)[Number(el.dataset.set)][el.dataset.field] = el.value;
+    updateRecordHint(WORKOUTS[params.id], params.index);
 });
 
 // ---------- Экраны ----------
@@ -348,7 +408,7 @@ function statsHtml() {
 function setRowsHtml(workout, index) {
     const ex = workout.exercises[index];
     const sets = sessionSets(workout, index);
-    const last = exerciseHistory[ex.name];
+    const last = lastSession(ex.name);
     const planReps = parseSets(ex.sets).reps;
     return sets.map((s, i) => {
         const prev = last && last.sets[i];
@@ -363,11 +423,30 @@ function setRowsHtml(workout, index) {
     }).join('');
 }
 
+function setsText(sets) {
+    return sets.map(s => (s.weight !== '' ? formatKg(Number(s.weight)) + ' кг' : '') +
+        (s.weight !== '' && s.reps !== '' ? ' × ' : '') + (s.reps !== '' ? s.reps : '')).join(', ');
+}
+
 function lastTimeText(name) {
-    const last = exerciseHistory[name];
+    const last = lastSession(name);
     if (!last || !last.sets.length) return '';
-    const sets = last.sets.map(s => (s.weight !== '' ? formatKg(s.weight) + ' кг' : '') + (s.weight !== '' && s.reps !== '' ? ' × ' : '') + (s.reps !== '' ? s.reps : '')).join(', ');
-    return `В прошлый раз (${humanDate(isoDate(new Date(last.date)))}): ${sets}`;
+    const record = personalRecord(exerciseLog[name]);
+    return `В прошлый раз (${humanDate(isoDate(new Date(last.date)))}): ${setsText(last.sets)}` +
+        (record ? `\nРекорд: ${bestText(record)} 🏆` : '');
+}
+
+function updateRecordHint(workout, index) {
+    const hint = document.getElementById('record-hint');
+    if (!hint) return;
+    const name = workout.exercises[index].name;
+    const sets = sessionSets(workout, index)
+        .map(s => ({ weight: toNumber(s.weight), reps: toNumber(s.reps) }))
+        .filter(s => s.weight !== '' || s.reps !== '');
+    const beaten = loggedKeys.has(`${workout.id}:${index}`) ? null : isNewRecord(name, sets);
+    if (beaten && hint.hidden) haptic('success');
+    hint.hidden = !beaten;
+    if (beaten) hint.textContent = `🏆 Новый рекорд! Было ${bestText(beaten)}`;
 }
 
 function rowHtml({ emoji, title, sub, go, id, done }) {
@@ -412,6 +491,7 @@ const SCREENS = {
             <h2>Мой прогресс</h2>
             <div class="list">
                 ${rowHtml({ emoji: '⚖️', title: 'Дневник веса', sub: 'Записать вес и посмотреть график', go: 'weight', id: '' })}
+                ${rowHtml({ emoji: '📈', title: 'Прогресс в упражнениях', sub: 'Рекорды и история рабочих весов', go: 'records', id: '' })}
                 <button class="row" data-action="coach"><span class="row-emoji">💬</span><span class="row-body"><div class="row-title">Написать тренеру</div></span><span class="row-arrow">›</span></button>
             </div>`;
     },
@@ -447,7 +527,7 @@ const SCREENS = {
                     </button>`).join('')}
             </div>
             ${workout.counts ? `<div class="list" style="margin-top:16px">${rowHtml({ emoji: cooldown.emoji, title: `После: ${cooldown.title}`, go: 'workout', id: cooldown.id })}</div>` : ''}`;
-        if (workout.counts) loadExerciseHistory();
+        if (workout.counts) loadExerciseLog();
         setMainButton('Начать ▶', () => go('exercise', { id, index: 0 }));
     },
 
@@ -469,17 +549,21 @@ const SCREENS = {
                 <h2>Рабочие веса</h2>
                 <div class="sets-head"><span>Подход</span><span>Вес, кг</span><span>Повторы</span></div>
                 <div id="set-rows">${setRowsHtml(workout, index)}</div>
+                <div class="record-hint" id="record-hint" hidden></div>
                 <button class="link" data-action="addSet" data-id="${workout.id}" data-index="${index}">＋ Добавить подход</button>
-                <p class="hint" id="last-time">${escapeHtml(lastTimeText(ex.name))}</p>` : ''}
+                <p class="hint description" id="last-time">${escapeHtml(lastTimeText(ex.name))}</p>
+                ${apiEnabled ? `<button class="link" data-go="exerciseProgress" data-id="${escapeHtml(ex.name)}">📈 Мой прогресс в упражнении</button><br>` : ''}` : ''}
             <button class="link" data-action="list">📋 Список упражнений</button>`;
 
         // История могла догрузиться уже после открытия экрана
-        if (workout.counts && historyRequest) {
-            historyRequest.then(() => {
+        if (workout.counts) updateRecordHint(workout, index);
+        if (workout.counts && logRequest) {
+            logRequest.then(() => {
                 const current = stack[stack.length - 1];
                 if (current.screen !== 'exercise' || current.params.id !== id || current.params.index !== index) return;
                 document.getElementById('last-time').textContent = lastTimeText(ex.name);
                 document.getElementById('set-rows').innerHTML = setRowsHtml(workout, index);
+                updateRecordHint(workout, index);
             });
         }
 
@@ -488,13 +572,15 @@ const SCREENS = {
             haptic();
             if (isLast) {
                 let sets = 0;
+                let records = [];
                 if (workout.counts) {
                     workout.exercises.forEach((_, i) => logExercise(workout, i));
                     sets = loggedSetsCount;
+                    records = newRecords.slice();
                     clearSession(workout);
                     markDone(workout.id);
                 }
-                go('finish', { id, sets }, true);
+                go('finish', { id, sets, records }, true);
             } else {
                 logExercise(workout, index);
                 go('exercise', { id, index: index + 1 }, true);
@@ -502,7 +588,7 @@ const SCREENS = {
         });
     },
 
-    finish({ id, sets }) {
+    finish({ id, sets, records = [] }) {
         const workout = WORKOUTS[id];
         const { cooldown } = DATA.extras;
         haptic('success');
@@ -513,6 +599,11 @@ const SCREENS = {
                 <p class="hint">${workout.counts ? 'Ты молодец! Так держать 🔥' : 'Отличная работа'}</p>
                 ${sets ? `<p class="hint">Записано подходов: ${sets} 📝</p>` : ''}
             </div>
+            ${records.length ? `
+                <div class="card records">
+                    <div class="row-title">🏆 ${records.length > 1 ? 'Новые рекорды' : 'Новый рекорд'}!</div>
+                    ${records.map(r => `<div class="history-row"><span>${escapeHtml(r.exercise)}</span><b>${escapeHtml(r.text)}</b></div>`).join('')}
+                </div>` : ''}
             ${workout.counts ? statsHtml() : ''}
             <div class="list">
                 ${workout.counts ? rowHtml({ emoji: cooldown.emoji, title: cooldown.title, sub: 'Восстановление после тренировки', go: 'workout', id: cooldown.id }) : ''}
@@ -520,6 +611,101 @@ const SCREENS = {
                 <button class="row" data-action="coach"><span class="row-emoji">💬</span><span class="row-body"><div class="row-title">Рассказать тренеру, как прошло</div></span><span class="row-arrow">›</span></button>
             </div>`;
         setMainButton('На главную', home);
+    },
+
+    records() {
+        app.innerHTML = `
+            <h1>📈 Прогресс в упражнениях</h1>
+            <p class="hint">Твои рекорды и история рабочих весов</p>
+            <div id="records-body"></div>`;
+        const body = document.getElementById('records-body');
+        if (!apiEnabled) {
+            body.innerHTML = '<div class="message">Открой приложение через бота, чтобы увидеть свой прогресс 🤖</div>';
+            return;
+        }
+        if (!logLoaded) {
+            body.innerHTML = '<div class="message">Загрузка…</div>';
+            loadExerciseLog().then(() => {
+                const current = stack[stack.length - 1];
+                if (current.screen !== 'records') return;
+                if (logLoaded) render();
+                else body.innerHTML = '<div class="message">Не получилось загрузить данные 😢</div>';
+            });
+            return;
+        }
+        const names = Object.keys(exerciseLog)
+            .filter(name => exerciseLog[name].length)
+            .sort((a, b) => new Date(lastSession(b).date) - new Date(lastSession(a).date));
+        if (names.length === 0) {
+            body.innerHTML = '<div class="message">Пока нет записей.<br>Вписывай вес и повторы во время тренировки — здесь появится твой прогресс 💪</div>';
+            return;
+        }
+        body.innerHTML = `<div class="list">${names.map(name => {
+            const count = exerciseLog[name].length;
+            const sub = `Рекорд: ${bestText(personalRecord(exerciseLog[name]))} · ${count} ${plural(count, 'тренировка', 'тренировки', 'тренировок')}`;
+            return rowHtml({ emoji: '🏆', title: name, sub, go: 'exerciseProgress', id: name });
+        }).join('')}</div>`;
+    },
+
+    exerciseProgress({ id: name }) {
+        app.innerHTML = `
+            <h1>${escapeHtml(name)}</h1>
+            <p class="hint">Прогресс рабочих весов</p>
+            <div id="progress-body"><div class="message">Загрузка…</div></div>`;
+        const body = document.getElementById('progress-body');
+
+        if (!logLoaded) {
+            loadExerciseLog().then(() => {
+                const current = stack[stack.length - 1];
+                if (current.screen === 'exerciseProgress' && logLoaded) render();
+            });
+            if (apiEnabled) return;
+        }
+        const list = exerciseLog[name] || [];
+        if (list.length === 0) {
+            body.innerHTML = '<div class="message">Пока нет записей по этому упражнению 📝</div>';
+            return;
+        }
+
+        const record = personalRecord(list);
+        const byWeight = record ? record.byWeight : false;
+        const unit = byWeight ? 'кг' : 'повт.';
+        // Лучший результат каждой тренировки и отметка, был ли он рекордом на тот момент
+        let max = -Infinity;
+        const sessions = list.map(s => {
+            const best = sessionBest(s.sets);
+            const comparable = best && best.byWeight === byWeight;
+            const isRecord = comparable && best.value > max && max !== -Infinity;
+            if (comparable) max = Math.max(max, best.value);
+            return { ...s, best: comparable ? best : null, isRecord };
+        });
+        const points = sessions.filter(s => s.best);
+        const first = points[0] && points[0].best.value;
+        const last = points.length ? points[points.length - 1].best.value : null;
+        const fmt = v => (v === null || v === undefined ? '—' : byWeight ? formatKg(v) : String(v));
+
+        body.innerHTML = `
+            <div class="stats">
+                <div class="stat"><div class="stat-value">${fmt(first)}</div><div class="stat-label">старт, ${unit}</div></div>
+                <div class="stat"><div class="stat-value">${fmt(last)}</div><div class="stat-label">сейчас, ${unit}</div></div>
+                <div class="stat"><div class="stat-value">${fmt(record && record.value)}</div><div class="stat-label">рекорд 🏆</div></div>
+            </div>
+            ${points.length > 1 ? '<div class="card"><canvas id="progress-chart"></canvas></div>' : ''}
+            <h2>История</h2>
+            <div class="card">
+                ${sessions.slice().reverse().map(s => `
+                    <div class="history-row">
+                        <span>${new Date(s.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}${s.isRecord ? ' 🏆' : ''}</span>
+                        <span class="history-sets">${escapeHtml(setsText(s.sets))}</span>
+                    </div>`).join('')}
+            </div>`;
+
+        if (points.length > 1) {
+            lineChart(document.getElementById('progress-chart'),
+                points.map(s => new Date(s.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })),
+                points.map(s => s.best.value),
+                v => byWeight ? formatKg(v) + ' кг' : v + ' повт.');
+        }
     },
 
     weight() {
@@ -611,17 +797,26 @@ function renderWeights(entries) {
                 </div>`).join('')}
         </div>`;
 
-    if (entries.length < 2 || typeof Chart === 'undefined') return;
+    if (entries.length > 1) {
+        lineChart(document.getElementById('weight-chart'),
+            entries.map(e => e.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })),
+            entries.map(e => e.weight),
+            v => formatKg(v) + ' кг');
+    }
+}
+
+function lineChart(canvas, labels, values, formatValue) {
+    if (typeof Chart === 'undefined' || !canvas) return;
     const theme = (tg && tg.themeParams) || {};
     const color = theme.button_color || '#e0567a';
     const textColor = theme.hint_color || '#8e8e93';
     if (chart) chart.destroy();
-    chart = new Chart(document.getElementById('weight-chart'), {
+    chart = new Chart(canvas, {
         type: 'line',
         data: {
-            labels: entries.map(e => e.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })),
+            labels,
             datasets: [{
-                data: entries.map(e => e.weight),
+                data: values,
                 borderColor: color,
                 backgroundColor: color + '22',
                 fill: true,
@@ -634,7 +829,7 @@ function renderWeights(entries) {
         options: {
             plugins: {
                 legend: { display: false },
-                tooltip: { callbacks: { label: ctx => formatKg(ctx.parsed.y) + ' кг' } }
+                tooltip: { callbacks: { label: ctx => formatValue(ctx.parsed.y) } }
             },
             scales: {
                 x: { ticks: { color: textColor }, grid: { display: false } },

@@ -3,7 +3,7 @@
  *
  * Что делает:
  *   • дневник веса тела (первый лист таблицы);
- *   • рабочие веса в упражнениях (лист «Тренировки», создаётся сам);
+ *   • рабочие веса в упражнениях, рекорды и история (лист «Тренировки», создаётся сам);
  *   • список клиентов, открывавших приложение (лист «Клиенты», создаётся сам);
  *   • еженедельное напоминание взвеситься — сообщение от бота с кнопкой «Записать вес».
  *
@@ -47,6 +47,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function doGet(e) {
   const user = verifyInitData_(e.parameter.initData || '');
   if (!user) return json_({ error: 'unauthorized' });
+  if (e.parameter.action === 'progress') return json_(progressFor_(user.id));
   if (e.parameter.action === 'history') return json_(historyFor_(user.id));
   return json_(weightsFor_(user.id));
 }
@@ -129,6 +130,32 @@ function addLog_(user, entries) {
     });
   }
   return { ok: true, saved: rows.length };
+}
+
+// Вся история по упражнениям: { "Ягодичный мост": [{ date, sets: [{ weight, reps }] }, …] } от старых к новым
+function progressFor_(userId) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOG_SHEET);
+  if (!sheet) return {};
+  const result = {};
+
+  sheet.getDataRange().getValues().slice(1).forEach(r => {
+    if (String(r[0]) !== String(userId) || !(r[2] instanceof Date)) return;
+    const list = result[r[4]] || (result[r[4]] = []);
+    const time = r[2].getTime();
+    // Подходы одного упражнения за одну тренировку записаны подряд с одинаковым временем
+    let session = list[list.length - 1];
+    if (!session || session.time !== time) {
+      session = { time: time, date: r[2].toISOString(), sets: [] };
+      list.push(session);
+    }
+    session.sets.push({ weight: r[6], reps: r[7] });
+  });
+
+  Object.values(result).forEach(list => {
+    list.sort((a, b) => a.time - b.time);
+    list.forEach(s => delete s.time);
+  });
+  return result;
 }
 
 // Последняя тренировка по каждому упражнению: { "Ягодичный мост": { date, sets: [{ weight, reps }] } }
