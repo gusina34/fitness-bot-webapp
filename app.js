@@ -45,6 +45,7 @@ const store = {
 // Прогресс: { total, history: [{ d: 'YYYY-MM-DD', w: workoutId }] } — последние 100 тренировок
 let progress = { total: 0, history: [] };
 let lastWeight = null;
+let lastWeightDate = null; // 'YYYY-MM-DD'
 
 async function loadProgress() {
     try {
@@ -52,6 +53,128 @@ async function loadProgress() {
         if (saved && Array.isArray(saved.history)) progress = saved;
     } catch (e) { /* пусто или повреждено — начинаем с нуля */ }
     lastWeight = parseFloat(await store.get('lastWeight')) || null;
+    lastWeightDate = await store.get('lastWeightDate');
+}
+
+function rememberLastWeight(weight, date) {
+    lastWeight = weight;
+    lastWeightDate = isoDate(date);
+    store.set('lastWeight', String(weight));
+    store.set('lastWeightDate', lastWeightDate);
+}
+
+// Пора взвешиваться: замеров нет или последний был 7+ дней назад
+function weighInDue() {
+    if (!lastWeightDate) return true;
+    const [y, m, d] = lastWeightDate.split('-').map(Number);
+    return (Date.now() - new Date(y, m - 1, d)) / 864e5 >= 7;
+}
+
+// ---------- Сервер: Google Apps Script ----------
+
+const apiEnabled = !!(CONFIG.googleScriptUrl && inTelegram);
+
+async function api(method, params = {}) {
+    const response = method === 'GET'
+        ? await fetch(`${CONFIG.googleScriptUrl}?${new URLSearchParams({ ...params, initData: tg.initData })}`)
+        : await fetch(CONFIG.googleScriptUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({ ...params, initData: tg.initData })
+        });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (data && data.error) throw new Error(data.error);
+    return data;
+}
+
+// ---------- Рабочие веса ----------
+
+// Введённые подходы текущей тренировки: 'workoutId:index' → [{ weight, reps }]
+const session = {};
+const loggedKeys = new Set();
+let loggedSetsCount = 0;
+// Последняя запись по каждому упражнению: name → { date, sets: [{ weight, reps }] }
+let exerciseHistory = {};
+let historyRequest = null;
+
+function loadExerciseHistory() {
+    if (!apiEnabled || historyRequest) return historyRequest;
+    historyRequest = api('GET', { action: 'history' })
+        .then(data => { exerciseHistory = { ...data, ...exerciseHistory }; })
+        .catch(error => { console.error('История упражнений:', error); historyRequest = null; });
+    return historyRequest;
+}
+
+// "4 × 12" → { sets: 4, reps: '12' }
+function parseSets(text) {
+    const m = String(text || '').match(/(\d+)\s*[×xх*]\s*(\d+(?:\s*[-–]\s*\d+)?)/i);
+    return m ? { sets: Math.min(Number(m[1]), 10), reps: m[2].replace(/\s/g, '') } : { sets: 3, reps: '' };
+}
+
+function sessionSets(workout, index) {
+    const key = `${workout.id}:${index}`;
+    if (!session[key]) {
+        session[key] = Array.from({ length: parseSets(workout.exercises[index].sets).sets }, () => ({ weight: '', reps: '' }));
+    }
+    return session[key];
+}
+
+function toNumber(value) {
+    const n = parseFloat(String(value).replace(',', '.'));
+    return isNaN(n) ? '' : n;
+}
+
+// Неотправленные записи переживают закрытие приложения и уходят при следующей возможности
+function readPending() {
+    try { return JSON.parse(localStorage.getItem('pendingLogs')) || []; } catch (e) { return []; }
+}
+function writePending(entries) {
+    try { localStorage.setItem('pendingLogs', JSON.stringify(entries.slice(-50))); } catch (e) { /* приватный режим */ }
+}
+
+let flushChain = Promise.resolve();
+function flushLogs() {
+    flushChain = flushChain.then(async () => {
+        const pending = readPending();
+        if (!apiEnabled || pending.length === 0) return;
+        try {
+            await api('POST', { action: 'log', entries: pending });
+            writePending(readPending().slice(pending.length));
+        } catch (error) {
+            console.error('Не удалось отправить рабочие веса, повторим позже:', error);
+        }
+    });
+    return flushChain;
+}
+
+function logExercise(workout, index) {
+    const key = `${workout.id}:${index}`;
+    if (!workout.counts || loggedKeys.has(key) || !session[key]) return;
+    const sets = session[key]
+        .map(s => ({ weight: toNumber(s.weight), reps: toNumber(s.reps) }))
+        .filter(s => s.weight !== '' || s.reps !== '');
+    if (sets.length === 0) return;
+
+    loggedKeys.add(key);
+    loggedSetsCount += sets.length;
+    const exercise = workout.exercises[index].name;
+    exerciseHistory[exercise] = { date: new Date().toISOString(), sets };
+    writePending(readPending().concat({
+        date: new Date().toISOString(),
+        workout: `${workout.program.title}, ${workout.title}`,
+        exercise,
+        sets
+    }));
+    flushLogs();
+}
+
+function clearSession(workout) {
+    Object.keys(session).filter(k => k.startsWith(workout.id + ':')).forEach(k => {
+        delete session[k];
+        loggedKeys.delete(k);
+    });
+    loggedSetsCount = 0;
 }
 
 function markDone(workoutId) {
@@ -193,8 +316,23 @@ app.addEventListener('click', event => {
 const ACTIONS = {
     coach: () => openLink(CONFIG.coachLink),
     video: el => openLink(el.dataset.url),
-    home: () => home()
+    home: () => home(),
+    addSet: el => {
+        const workout = WORKOUTS[el.dataset.id];
+        const index = Number(el.dataset.index);
+        sessionSets(workout, index).push({ weight: '', reps: '' });
+        document.getElementById('set-rows').innerHTML = setRowsHtml(workout, index);
+    }
 };
+
+// Ввод рабочих весов сохраняется сразу, чтобы не потеряться при переходах по списку
+app.addEventListener('input', event => {
+    const el = event.target;
+    if (el.dataset.set === undefined) return;
+    const { screen, params } = stack[stack.length - 1];
+    if (screen !== 'exercise') return;
+    sessionSets(WORKOUTS[params.id], params.index)[Number(el.dataset.set)][el.dataset.field] = el.value;
+});
 
 // ---------- Экраны ----------
 
@@ -205,6 +343,31 @@ function statsHtml() {
             <div class="stat"><div class="stat-value">${doneThisWeek()}</div><div class="stat-label">на этой неделе</div></div>
             <div class="stat"><div class="stat-value">${lastWeight ? formatKg(lastWeight) : '—'}</div><div class="stat-label">вес, кг</div></div>
         </div>`;
+}
+
+function setRowsHtml(workout, index) {
+    const ex = workout.exercises[index];
+    const sets = sessionSets(workout, index);
+    const last = exerciseHistory[ex.name];
+    const planReps = parseSets(ex.sets).reps;
+    return sets.map((s, i) => {
+        const prev = last && last.sets[i];
+        const weightHint = prev && prev.weight !== '' ? formatKg(prev.weight) : 'кг';
+        const repsHint = prev && prev.reps !== '' ? prev.reps : (planReps || 'раз');
+        return `
+            <div class="set-row">
+                <span class="set-num">${i + 1}</span>
+                <input type="text" inputmode="decimal" data-set="${i}" data-field="weight" value="${escapeHtml(s.weight)}" placeholder="${escapeHtml(weightHint)}" autocomplete="off">
+                <input type="text" inputmode="numeric" data-set="${i}" data-field="reps" value="${escapeHtml(s.reps)}" placeholder="${escapeHtml(repsHint)}" autocomplete="off">
+            </div>`;
+    }).join('');
+}
+
+function lastTimeText(name) {
+    const last = exerciseHistory[name];
+    if (!last || !last.sets.length) return '';
+    const sets = last.sets.map(s => (s.weight !== '' ? formatKg(s.weight) + ' кг' : '') + (s.weight !== '' && s.reps !== '' ? ' × ' : '') + (s.reps !== '' ? s.reps : '')).join(', ');
+    return `В прошлый раз (${humanDate(isoDate(new Date(last.date)))}): ${sets}`;
 }
 
 function rowHtml({ emoji, title, sub, go, id, done }) {
@@ -226,6 +389,12 @@ const SCREENS = {
         app.innerHTML = `
             <h1>Привет${name}! 💪</h1>
             <p class="hint">Выбери, где тренируемся сегодня</p>
+            ${CONFIG.googleScriptUrl && weighInDue() ? `
+                <button class="banner" data-go="weight">
+                    <span class="row-emoji">⚖️</span>
+                    <span class="row-body"><div class="row-title">Пора взвеситься</div><div class="banner-sub">${lastWeightDate ? 'Прошла неделя с последнего замера' : 'Запиши свой стартовый вес'}</div></span>
+                    <span>›</span>
+                </button>` : ''}
             ${statsHtml()}
             <div class="tiles">
                 ${DATA.programs.map(p => `
@@ -278,6 +447,7 @@ const SCREENS = {
                     </button>`).join('')}
             </div>
             ${workout.counts ? `<div class="list" style="margin-top:16px">${rowHtml({ emoji: cooldown.emoji, title: `После: ${cooldown.title}`, go: 'workout', id: cooldown.id })}</div>` : ''}`;
+        if (workout.counts) loadExerciseHistory();
         setMainButton('Начать ▶', () => go('exercise', { id, index: 0 }));
     },
 
@@ -295,21 +465,44 @@ const SCREENS = {
             ${isMp4 ? `<video src="${escapeHtml(ex.video)}" controls playsinline preload="metadata"></video>` : ''}
             ${ex.video && !isMp4 ? `<button class="btn secondary" data-action="video" data-url="${escapeHtml(ex.video)}">▶ Смотреть видео</button>` : ''}
             ${ex.description ? `<p class="description">${escapeHtml(ex.description)}</p>` : ''}
+            ${workout.counts ? `
+                <h2>Рабочие веса</h2>
+                <div class="sets-head"><span>Подход</span><span>Вес, кг</span><span>Повторы</span></div>
+                <div id="set-rows">${setRowsHtml(workout, index)}</div>
+                <button class="link" data-action="addSet" data-id="${workout.id}" data-index="${index}">＋ Добавить подход</button>
+                <p class="hint" id="last-time">${escapeHtml(lastTimeText(ex.name))}</p>` : ''}
             <button class="link" data-action="list">📋 Список упражнений</button>`;
 
-        ACTIONS.list = () => back();
+        // История могла догрузиться уже после открытия экрана
+        if (workout.counts && historyRequest) {
+            historyRequest.then(() => {
+                const current = stack[stack.length - 1];
+                if (current.screen !== 'exercise' || current.params.id !== id || current.params.index !== index) return;
+                document.getElementById('last-time').textContent = lastTimeText(ex.name);
+                document.getElementById('set-rows').innerHTML = setRowsHtml(workout, index);
+            });
+        }
+
+        ACTIONS.list = () => { logExercise(workout, index); back(); };
         setMainButton(isLast ? 'Завершить тренировку ✅' : 'Следующее ▸', () => {
             haptic();
             if (isLast) {
-                if (workout.counts) markDone(workout.id);
-                go('finish', { id }, true);
+                let sets = 0;
+                if (workout.counts) {
+                    workout.exercises.forEach((_, i) => logExercise(workout, i));
+                    sets = loggedSetsCount;
+                    clearSession(workout);
+                    markDone(workout.id);
+                }
+                go('finish', { id, sets }, true);
             } else {
+                logExercise(workout, index);
                 go('exercise', { id, index: index + 1 }, true);
             }
         });
     },
 
-    finish({ id }) {
+    finish({ id, sets }) {
         const workout = WORKOUTS[id];
         const { cooldown } = DATA.extras;
         haptic('success');
@@ -318,6 +511,7 @@ const SCREENS = {
                 <div class="finish-emoji">🎉</div>
                 <h1>${workout.counts ? 'Тренировка завершена!' : 'Готово!'}</h1>
                 <p class="hint">${workout.counts ? 'Ты молодец! Так держать 🔥' : 'Отличная работа'}</p>
+                ${sets ? `<p class="hint">Записано подходов: ${sets} 📝</p>` : ''}
             </div>
             ${workout.counts ? statsHtml() : ''}
             <div class="list">
@@ -372,16 +566,10 @@ async function loadWeights(newWeight) {
     body.innerHTML = `<div class="message">${newWeight ? 'Сохраняю…' : 'Загрузка…'}</div>`;
 
     try {
-        const response = newWeight
-            ? await fetch(CONFIG.googleScriptUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                body: JSON.stringify({ initData: tg.initData, weight: newWeight })
-            })
-            : await fetch(`${CONFIG.googleScriptUrl}?initData=${encodeURIComponent(tg.initData)}`);
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        const data = await response.json();
-        if (!Array.isArray(data)) throw new Error(data && data.error);
+        const data = newWeight
+            ? await api('POST', { action: 'weight', weight: newWeight })
+            : await api('GET');
+        if (!Array.isArray(data)) throw new Error('Неверный ответ');
 
         const entries = data
             .map(row => ({ date: new Date(row.date), weight: parseFloat(String(row.weight).replace(',', '.')) }))
@@ -404,8 +592,7 @@ function renderWeights(entries) {
         return;
     }
 
-    lastWeight = entries[entries.length - 1].weight;
-    store.set('lastWeight', String(lastWeight));
+    rememberLastWeight(entries[entries.length - 1].weight, entries[entries.length - 1].date);
 
     const diff = lastWeight - entries[0].weight;
     body.innerHTML = `
@@ -459,7 +646,23 @@ function renderWeights(entries) {
 
 // ---------- Старт ----------
 
+// Регистрируем клиента для еженедельных напоминаний и узнаём дату последнего замера
+function hello() {
+    if (!apiEnabled) return;
+    api('POST', { action: 'hello' })
+        .then(data => {
+            if (!data.lastWeightDate) return;
+            const date = new Date(data.lastWeightDate);
+            if (lastWeightDate && isoDate(date) <= lastWeightDate) return;
+            rememberLastWeight(data.lastWeight, date);
+            if (stack.length && stack[stack.length - 1].screen === 'home') render();
+        })
+        .catch(error => console.error('Регистрация клиента:', error));
+}
+
 loadProgress().then(() => {
+    hello();
+    flushLogs();
     // Сразу открыть нужный экран: адрес кнопки ...fitness-bot-webapp/?open=weight
     // или ссылка t.me/Nina_fitbody_bot/app?startapp=weight
     const start = new URLSearchParams(location.search).get('open') || (inTelegram && tg.initDataUnsafe.start_param);

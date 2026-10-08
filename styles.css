@@ -113,3 +113,22 @@ video { width: 100%; border-radius: 14px; background: #000; margin: 8px 0; }
     padding: 15px; font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-text); cursor: pointer;
 }
 [hidden] { display: none !important; }
+
+/* Рабочие веса */
+.sets-head, .set-row { display: grid; grid-template-columns: 52px 1fr 1fr; gap: 8px; align-items: center; }
+.sets-head { font-size: 12px; color: var(--hint); margin-bottom: 6px; text-align: center; }
+.set-row { margin-bottom: 8px; }
+.set-num { text-align: center; font-weight: 600; color: var(--hint); }
+.set-row input {
+    min-width: 0; width: 100%; font: inherit; font-size: 17px; padding: 11px 8px; text-align: center;
+    border: 0; border-radius: 10px; background: var(--bg2); color: var(--text);
+}
+.set-row input::placeholder { color: var(--hint); opacity: .7; }
+
+/* Напоминание о взвешивании */
+.banner {
+    display: flex; align-items: center; gap: 12px; width: 100%; margin: 4px 0 0;
+    border: 0; border-radius: 14px; padding: 14px; font: inherit; text-align: left; cursor: pointer;
+    background: var(--accent); color: var(--accent-text);
+}
+.banner-sub { font-size: 13px; opacity: .85; }
