@@ -185,7 +185,7 @@ async function loadDay(date) {
     if (dayCache[date]) return dayCache[date];
     let day = null;
     try { day = JSON.parse(await store.get('day_' + date)); } catch (e) { /* пусто */ }
-    return (dayCache[date] = Object.assign({ date, water: 0, protein: 0, carbs: 0, burned: 0, eaten: {} }, day || {}));
+    return (dayCache[date] = Object.assign({ date, water: 0, kcal: 0, protein: 0, carbs: 0, burned: 0, eaten: {} }, day || {}));
 }
 
 let syncTimer = null;
@@ -194,7 +194,7 @@ function saveDay(day) {
     if (!apiEnabled) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => {
-        api('POST', { action: 'day', day: { date: day.date, water: day.water, protein: round(day.protein), carbs: round(day.carbs), burned: day.burned } })
+        api('POST', { action: 'day', day: { date: day.date, water: day.water, protein: round(day.protein), carbs: round(day.carbs), burned: day.burned, kcal: round(day.kcal) } })
             .catch(error => console.error('Питание за день не сохранилось в таблицу:', error));
     }, 1500);
 }
@@ -241,7 +241,7 @@ Object.assign(SCREENS, {
                     </button>`}
                 <h2>Сегодня</h2>
                 <div class="list">
-                    ${rowHtml({ emoji: '📅', title: 'Мой день', sub: norm ? `💧 ${liters(day.water)} из ${liters(norm.water)} л · белок ${round(day.protein)} из ${norm.p} г` : 'Вода, белок, углеводы, потраченные калории', go: 'day', id: '' })}
+                    ${rowHtml({ emoji: '📅', title: 'Мой день', sub: norm ? `🍽 ${round(day.kcal)} из ${norm.kcal} ккал · 💧 ${liters(day.water)} из ${liters(norm.water)} л` : 'Калории, вода, белок, углеводы, активность', go: 'day', id: '' })}
                     ${norm ? rowHtml({ emoji: '🍽', title: 'Рацион на сегодня', sub: 'Собран из рецептов под твою норму', go: 'plan', id: '' }) : ''}
                 </div>
                 <h2>Рецепты</h2>
@@ -366,18 +366,20 @@ Object.assign(SCREENS, {
                             </div>`;
                     }).join('')}
                 </div>
-                <p class="hint" style="margin-top:12px">Нажми «Съела» — белок и углеводы добавятся в «Мой день».</p>`;
+                <p class="hint" style="margin-top:12px">Нажми «Съела» — калории, белок и углеводы добавятся в «Мой день».</p>`;
 
             ACTIONS.eatSlot = el => {
                 const slot = el.dataset.id;
                 const i = Number(el.dataset.index);
                 const mt = scaleTotals(recipeTotals(plan.recipes[i]), plan.factors[i]);
                 if (day.eaten[slot]) {
+                    day.kcal = Math.max(0, day.kcal - (day.eaten[slot].k || 0));
                     day.protein = Math.max(0, day.protein - day.eaten[slot].p);
                     day.carbs = Math.max(0, day.carbs - day.eaten[slot].c);
                     delete day.eaten[slot];
                 } else {
-                    day.eaten[slot] = { p: round(mt.p), c: round(mt.c) };
+                    day.eaten[slot] = { k: round(mt.kcal), p: round(mt.p), c: round(mt.c) };
+                    day.kcal += round(mt.kcal);
                     day.protein += round(mt.p);
                     day.carbs += round(mt.c);
                     haptic('success');
@@ -419,6 +421,7 @@ Object.assign(SCREENS, {
                         </div>
                     </div>
 
+                    ${trackerCard('kcal', '🍽 Съедено', day.kcal, norm && norm.kcal, 'ккал', norm ? (norm.kcal >= day.kcal ? `Осталось ${round(norm.kcal - day.kcal)} ккал` : `Больше нормы на ${round(day.kcal - norm.kcal)} ккал`) : '')}
                     ${trackerCard('protein', '🥩 Белок', day.protein, norm && norm.p, 'г')}
                     ${trackerCard('carbs', '🍚 Углеводы', day.carbs, norm && norm.c, 'г')}
 
@@ -431,7 +434,13 @@ Object.assign(SCREENS, {
                         </form>
                     </div>
 
-                    ${norm ? rowHtml({ emoji: '🍽', title: 'Рацион на сегодня', sub: 'Отмечай съеденное — белок и углеводы посчитаются сами', go: 'plan', id: '' }) : ''}
+                    <div class="card tracker balance">
+                        <div class="tracker-head"><span>⚖️ Баланс дня</span><b>${round(day.kcal - day.burned)} ккал</b></div>
+                        <p class="hint" style="margin:6px 0 0">Съедено ${round(day.kcal)} − потрачено ${day.burned || 0} ккал</p>
+                        ${norm ? `<p class="hint" style="margin:6px 0 0">Норма ${norm.kcal} ккал уже учитывает твою обычную активность, поэтому «съеденное» сравнивай с нормой, а баланс — между днями: чем больше двигаешься, тем он ниже.</p>` : ''}
+                    </div>
+
+                    ${norm ? rowHtml({ emoji: '🍽', title: 'Рацион на сегодня', sub: 'Отмечай съеденное — калории, белок и углеводы посчитаются сами', go: 'plan', id: '' }) : ''}
                     <h2>Последние 7 дней</h2>
                     <div class="card" id="week"><div class="message">Загрузка…</div></div>`;
                 drawWeek(norm);
@@ -545,21 +554,23 @@ Object.assign(SCREENS, {
         setMainButton(`Съела ${factor !== 1 ? portionText(factor) : 'порцию'} ✓`, async () => {
             const t = scaleTotals(per, factor);
             const day = await loadDay(todayIso());
+            day.kcal += round(t.kcal);
             day.protein += round(t.p);
             day.carbs += round(t.c);
             saveDay(day);
             haptic('success');
-            const text = `Добавлено в «Мой день»: белок ${round(t.p)} г, углеводы ${round(t.c)} г`;
+            const text = `Добавлено в «Мой день»: ${round(t.kcal)} ккал, белок ${round(t.p)} г, углеводы ${round(t.c)} г`;
             inTelegram ? tg.showAlert(text) : alert(text);
         });
     }
 });
 
-function trackerCard(field, title, value, goal, unit) {
+function trackerCard(field, title, value, goal, unit, note = '') {
     return `
         <div class="card tracker">
             <div class="tracker-head"><span>${title}</span><b>${round(value)}${goal ? ' / ' + goal : ''} ${unit}</b></div>
             ${goal ? bar(value, goal) : ''}
+            ${note ? `<p class="hint" style="margin:-4px 0 10px">${note}</p>` : ''}
             <form class="weight-form" data-form="${field}">
                 <input type="text" inputmode="decimal" placeholder="+ ${unit}" autocomplete="off">
                 <button class="btn" type="submit">Добавить</button>
@@ -578,11 +589,11 @@ async function drawWeek(norm) {
     const el = document.getElementById('week');
     if (!el) return;
     el.innerHTML = days.map(d => {
-        const ok = norm && d.water >= norm.water && d.protein >= norm.p * 0.9;
+        const ok = norm && d.water >= norm.water && d.protein >= norm.p * 0.9 && d.kcal > 0 && d.kcal <= norm.kcal * 1.05;
         return `
             <div class="history-row week-row">
                 <span>${humanDate(d.date)}${ok ? ' ✅' : ''}</span>
-                <span class="history-sets">💧 ${liters(d.water)} л · Б ${round(d.protein)} · У ${round(d.carbs)} · 🔥 ${d.burned || 0}</span>
+                <span class="history-sets">🍽 ${round(d.kcal)} · 🔥 ${d.burned || 0} · Б ${round(d.protein)} · У ${round(d.carbs)} · 💧 ${liters(d.water)} л</span>
             </div>`;
     }).join('');
 }
