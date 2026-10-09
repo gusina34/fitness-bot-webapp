@@ -483,6 +483,9 @@ const SCREENS = {
                         <span class="tile-sub">${p.workouts.length} ${plural(p.workouts.length, 'тренировка', 'тренировки', 'тренировок')}</span>
                     </button>`).join('')}
             </div>
+            <div class="list" style="margin-top:10px">
+                ${rowHtml({ emoji: '🥗', title: 'Питание', sub: 'Норма КБЖУ, рацион на день, рецепты, вода', go: 'nutrition', id: '' })}
+            </div>
             <h2>Разминка и восстановление</h2>
             <div class="list">
                 ${rowHtml({ emoji: warmup.emoji, title: warmup.title, sub: 'Перед тренировкой', go: 'workout', id: warmup.id })}
@@ -863,5 +866,6 @@ loadProgress().then(() => {
     const start = new URLSearchParams(location.search).get('open') || (inTelegram && tg.initDataUnsafe.start_param);
     home();
     if (start === 'weight') go('weight');
+    else if (start === 'nutrition' || start === 'day') go(start);
     else if (start && WORKOUTS[start]) go('workout', { id: start });
 });

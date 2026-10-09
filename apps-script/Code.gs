@@ -5,6 +5,7 @@
  *   • дневник веса тела (первый лист таблицы);
  *   • рабочие веса в упражнениях, рекорды и история (лист «Тренировки», создаётся сам);
  *   • список клиентов, открывавших приложение (лист «Клиенты», создаётся сам);
+ *   • питание за день: вода, белок, углеводы, потраченные калории (лист «Питание», создаётся сам);
  *   • еженедельное напоминание взвеситься — сообщение от бота с кнопкой «Записать вес».
  *
  * Telegram подписывает данные пользователя токеном бота. Скрипт проверяет подпись,
@@ -27,6 +28,8 @@
 const WEIGHT_SHEET = ''; // пусто = первый лист
 const LOG_SHEET = 'Тренировки';
 const CLIENTS_SHEET = 'Клиенты';
+const FOOD_SHEET = 'Питание';
+const FOOD_HEADERS = ['telegram_id', 'имя', 'дата', 'вода, мл', 'белок, г', 'углеводы, г', 'потрачено, ккал'];
 const LOG_HEADERS = ['telegram_id', 'имя', 'дата', 'тренировка', 'упражнение', 'подход', 'вес, кг', 'повторы'];
 const CLIENT_HEADERS = ['telegram_id', 'имя', 'username', 'первый вход', 'последний вход', 'напоминания'];
 
@@ -66,6 +69,7 @@ function doPost(e) {
   if (action === 'weight') return json_(addWeight_(user, body.weight));
   if (action === 'log') return json_(addLog_(user, body.entries));
   if (action === 'hello') return json_(hello_(user));
+  if (action === 'day') return json_(saveDay_(user, body.day || {}));
   return json_({ error: 'unknown action' });
 }
 
@@ -178,6 +182,32 @@ function historyFor_(userId) {
 
   Object.values(result).forEach(v => delete v.day);
   return result;
+}
+
+// ---- Питание за день: одна строка на клиента и дату ----
+
+function saveDay_(user, day) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day.date))) return { error: 'bad date' };
+  const values = [
+    number_(day.water, 0, 10000),
+    number_(day.protein, 0, 1000),
+    number_(day.carbs, 0, 2000),
+    number_(day.burned, 0, 5000)
+  ];
+  const tz = Session.getScriptTimeZone();
+  withLock_(() => {
+    const sheet = sheetByName_(FOOD_SHEET, FOOD_HEADERS);
+    const rows = sheet.getDataRange().getValues();
+    const index = rows.findIndex((r, i) => i > 0 && String(r[0]) === String(user.id) &&
+      (r[2] instanceof Date ? Utilities.formatDate(r[2], tz, 'yyyy-MM-dd') : String(r[2])) === day.date);
+    if (index === -1) {
+      // Апостроф — чтобы таблица хранила дату как текст и не путала часовые пояса
+      sheet.appendRow([String(user.id), displayName_(user), "'" + day.date].concat(values));
+    } else {
+      sheet.getRange(index + 1, 4, 1, 4).setValues([values]);
+    }
+  });
+  return { ok: true };
 }
 
 // ---- Клиенты ----
