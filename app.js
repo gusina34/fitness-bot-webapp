@@ -300,6 +300,72 @@ function plural(n, one, few, many) {
     return many;
 }
 
+// ---------- Таймер для гимнастики и МФР ----------
+
+const timer = { id: null, index: 0, side: 0, left: 0, running: false, interval: null };
+
+function resetTimer(id, index) {
+    stopTimer();
+    timer.id = id;
+    timer.index = index;
+    timer.side = 0;
+    timer.left = WORKOUTS[id].exercises[index].duration;
+}
+
+function stopTimer() {
+    clearInterval(timer.interval);
+    timer.interval = null;
+    if (!timer.running) keepScreenOn(false);
+}
+
+function formatTime(sec) {
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+function exDurationText(ex) {
+    return ex.sides > 1 ? `${ex.sides} × ${ex.duration} с` : `${ex.duration} с`;
+}
+
+function durationText(workout) {
+    const sec = workout.exercises.reduce((sum, ex) => sum + (ex.duration || 0) * (ex.sides || 1), 0);
+    return sec ? `≈ ${Math.max(1, Math.round(sec / 60))} мин` : '';
+}
+
+// Короткий звуковой сигнал; звук разрешён только после нажатия пользователя
+let audioCtx = null;
+function unlockAudio() {
+    try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    } catch (e) { /* без звука */ }
+}
+function beep(freq, ms) {
+    if (!audioCtx) return;
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.frequency.value = freq;
+        gain.gain.value = 0.15;
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + ms / 1000);
+    } catch (e) { /* без звука */ }
+}
+
+// Экран не гаснет, пока идёт таймер
+let wakeLock = null;
+function keepScreenOn(on) {
+    try {
+        if (on && !wakeLock && navigator.wakeLock) {
+            navigator.wakeLock.request('screen').then(lock => { wakeLock = lock; }).catch(() => {});
+        } else if (!on && wakeLock) {
+            wakeLock.release();
+            wakeLock = null;
+        }
+    } catch (e) { /* не поддерживается */ }
+}
+
 // ---------- Кнопки «Назад» и главная кнопка ----------
 
 const pageBack = document.getElementById('page-back');
@@ -319,8 +385,12 @@ if (nativeButtons) {
     pageBack.addEventListener('click', onBackClick);
 }
 
+let mainText = null;
+
 function setMainButton(text, handler) {
     mainHandler = handler;
+    if (text === mainText) return;
+    mainText = text;
     if (nativeButtons) {
         if (text) {
             tg.MainButton.setText(text);
@@ -363,6 +433,8 @@ function render() {
     const { screen, params } = stack[stack.length - 1];
     setMainButton(null);
     setBackButton(stack.length > 1);
+    stopTimer();
+    if (screen !== 'timed') timer.running = false;
     if (typeof Chart !== 'undefined') destroyCharts();
     window.scrollTo(0, 0);
     SCREENS[screen](params);
@@ -493,8 +565,8 @@ const SCREENS = {
             </div>
             <h2>Разминка и восстановление</h2>
             <div class="list">
-                ${rowHtml({ emoji: warmup.emoji, title: warmup.title, sub: 'Перед тренировкой', go: 'workout', id: warmup.id })}
-                ${rowHtml({ emoji: cooldown.emoji, title: cooldown.title, sub: 'После тренировки', go: 'workout', id: cooldown.id })}
+                ${rowHtml({ emoji: warmup.emoji, title: warmup.title, sub: `${warmup.subtitle || 'Перед тренировкой'} · ${durationText(warmup)}`, go: 'workout', id: warmup.id })}
+                ${rowHtml({ emoji: cooldown.emoji, title: cooldown.title, sub: `${cooldown.subtitle || 'После тренировки'} · ${durationText(cooldown)}`, go: 'workout', id: cooldown.id })}
             </div>
             <h2>Мой прогресс</h2>
             <div class="list">
@@ -520,6 +592,7 @@ const SCREENS = {
 
     workout({ id }) {
         const workout = WORKOUTS[id];
+        if (workout.timed) return SCREENS.timedOverview(workout);
         const { warmup, cooldown } = DATA.extras;
         const title = workout.program ? `${workout.program.emoji} ${escapeHtml(workout.title)}` : `${workout.emoji} ${escapeHtml(workout.title)}`;
         app.innerHTML = `
@@ -596,6 +669,138 @@ const SCREENS = {
         });
     },
 
+    timedOverview(workout) {
+        app.innerHTML = `
+            <h1>${workout.emoji} ${escapeHtml(workout.title)}</h1>
+            <p class="hint">${escapeHtml(workout.subtitle || '')}</p>
+            <div class="tags">
+                <span class="tag">⏱ ${durationText(workout)}</span>
+                <span class="tag">${workout.exercises.length} ${plural(workout.exercises.length, 'упражнение', 'упражнения', 'упражнений')}</span>
+                ${workout.equipment ? `<span class="tag">🧰 ${escapeHtml(workout.equipment)}</span>` : ''}
+            </div>
+            ${workout.intro ? `<p class="description">${escapeHtml(workout.intro)}</p>` : ''}
+            ${workout.rules ? `
+                <div class="card tip">
+                    <div class="row-title" style="margin-bottom:6px">⚠️ Важно</div>
+                    <ul class="rules">${workout.rules.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
+                </div>` : ''}
+            <h2>Упражнения</h2>
+            <div class="list">
+                ${workout.exercises.map((ex, i) => `
+                    <button class="row" data-go="timed" data-id="${workout.id}" data-index="${i}">
+                        <span class="check">${i + 1}</span>
+                        <span class="row-body">
+                            <div class="row-title">${escapeHtml(ex.name)}</div>
+                            <div class="row-sub">${exDurationText(ex)}${ex.equipment ? ' · ' + escapeHtml(ex.equipment) : ''}</div>
+                        </span>
+                        <span class="row-arrow">›</span>
+                    </button>`).join('')}
+            </div>
+            <p class="hint" style="margin-top:12px">Нажми «Начать» — приложение само поведёт по упражнениям: таймер, смена сторон и переход к следующему. Телефон можно положить рядом.</p>`;
+        setMainButton('Начать ▶', () => {
+            resetTimer(workout.id, 0);
+            go('timed', { id: workout.id, index: 0 });
+        });
+    },
+
+    timed({ id, index }) {
+        const workout = WORKOUTS[id];
+        const ex = workout.exercises[index];
+        const sides = ex.sides || 1;
+        const next = workout.exercises[index + 1];
+        const isMp4 = ex.video && /\.mp4(\?|$)/i.test(ex.video);
+        if (timer.id !== id || timer.index !== index) resetTimer(id, index);
+
+        app.innerHTML = `
+            <p class="hint" style="margin:0">${escapeHtml(workout.title)} · ${index + 1} из ${workout.exercises.length}</p>
+            <div class="progress"><div style="width:${((index + 1) / workout.exercises.length) * 100}%"></div></div>
+            <h1>${escapeHtml(ex.name)}</h1>
+            ${ex.equipment ? `<div class="tags"><span class="tag">🧰 ${escapeHtml(ex.equipment)}</span></div>` : ''}
+            <div class="timer">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                    <circle class="timer-track" cx="60" cy="60" r="54"></circle>
+                    <circle class="timer-ring" id="timer-ring" cx="60" cy="60" r="54"></circle>
+                </svg>
+                <div class="timer-center">
+                    <div class="timer-value" id="timer-value"></div>
+                    <div class="timer-side" id="timer-side"></div>
+                </div>
+            </div>
+            <div class="timer-controls">
+                <button class="link" data-action="timerPrev" ${index === 0 ? 'disabled' : ''}>‹ Предыдущее</button>
+                <button class="link" data-action="timerRestart">↺ Заново</button>
+                <button class="link" data-action="timerSkip">${next ? 'Пропустить ›' : 'Завершить ›'}</button>
+            </div>
+            ${isMp4 ? `<video src="${escapeHtml(ex.video)}" controls playsinline preload="metadata"></video>` : ''}
+            ${ex.video && !isMp4 ? `<button class="btn secondary" data-action="video" data-url="${escapeHtml(ex.video)}">▶ Смотреть видео</button>` : ''}
+            ${ex.description ? `<p class="description">${escapeHtml(ex.description)}</p>` : ''}
+            <div class="next-up">${next ? `Дальше: <b>${escapeHtml(next.name)}</b> · ${exDurationText(next)}` : 'Это последнее упражнение 💪'}</div>`;
+
+        const goNext = () => {
+            if (next) go('timed', { id, index: index + 1 }, true);
+            else {
+                timer.running = false;
+                go('finish', { id }, true);
+            }
+        };
+
+        const update = () => {
+            const circumference = 2 * Math.PI * 54;
+            document.getElementById('timer-ring').style.strokeDashoffset = String(circumference * (1 - timer.left / ex.duration));
+            document.getElementById('timer-value').textContent = formatTime(timer.left);
+            document.getElementById('timer-side').textContent = sides > 1
+                ? (timer.side === 0 ? 'Первая сторона' : 'Вторая сторона')
+                : '';
+            const fresh = timer.left === ex.duration && timer.side === 0;
+            setMainButton(timer.running ? '⏸ Пауза' : fresh ? '▶ Старт' : '▶ Продолжить', toggle);
+        };
+
+        const tick = () => {
+            timer.left -= 1;
+            if (timer.left > 0 && timer.left <= 3) { beep(660, 80); haptic(); }
+            if (timer.left > 0) return update();
+            if (timer.side < sides - 1) {
+                timer.side += 1;
+                timer.left = ex.duration;
+                beep(990, 250);
+                haptic('success');
+                document.getElementById('timer-side').classList.add('flash');
+                return update();
+            }
+            beep(990, 350);
+            haptic('success');
+            stopTimer();
+            goNext();
+        };
+
+        const start = () => {
+            timer.running = true;
+            unlockAudio();
+            keepScreenOn(true);
+            stopTimer();
+            timer.interval = setInterval(tick, 1000);
+            update();
+        };
+        const toggle = () => {
+            haptic();
+            if (timer.running) {
+                timer.running = false;
+                stopTimer();
+                keepScreenOn(false);
+                update();
+            } else {
+                start();
+            }
+        };
+
+        ACTIONS.timerSkip = () => { stopTimer(); goNext(); };
+        ACTIONS.timerPrev = () => { if (index > 0) { resetTimer(id, index - 1); go('timed', { id, index: index - 1 }, true); } };
+        ACTIONS.timerRestart = () => { resetTimer(id, index); render(); };
+
+        update();
+        if (timer.running) start();
+    },
+
     finish({ id, sets, records = [] }) {
         const workout = WORKOUTS[id];
         const { cooldown } = DATA.extras;
@@ -604,7 +809,7 @@ const SCREENS = {
             <div class="finish">
                 <div class="finish-emoji">🎉</div>
                 <h1>${workout.counts ? 'Тренировка завершена!' : 'Готово!'}</h1>
-                <p class="hint">${workout.counts ? 'Ты молодец! Так держать 🔥' : 'Отличная работа'}</p>
+                <p class="hint">${workout.counts ? 'Ты молодец! Так держать 🔥' : id === DATA.extras.warmup.id ? 'Мышцы разогреты — можно начинать тренировку 💪' : 'Отличная работа! Мышцы скажут спасибо 🙏'}</p>
                 ${sets ? `<p class="hint">Записано подходов: ${sets} 📝</p>` : ''}
             </div>
             ${records.length ? `

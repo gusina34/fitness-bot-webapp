@@ -223,3 +223,22 @@ video { width: 100%; border-radius: 14px; background: #000; margin: 8px 0; }
 }
 .chip.active { background: var(--accent); color: var(--accent-text); }
 .card.empty { text-align: center; color: var(--hint); line-height: 1.5; }
+
+/* Таймер гимнастики и МФР */
+.timer { position: relative; width: 220px; height: 220px; margin: 16px auto 4px; }
+.timer svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.timer-track { fill: none; stroke: var(--bg2); stroke-width: 8; }
+.timer-ring {
+    fill: none; stroke: var(--accent); stroke-width: 8; stroke-linecap: round;
+    stroke-dasharray: 339.29; transition: stroke-dashoffset 1s linear;
+}
+.timer-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.timer-value { font-size: 52px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.timer-side { font-size: 14px; color: var(--hint); min-height: 18px; }
+.timer-side.flash { color: var(--accent); font-weight: 700; }
+.timer-controls { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.timer-controls .link:disabled { color: var(--hint); opacity: .5; }
+.next-up { margin-top: 16px; padding: 12px 14px; border-radius: 12px; background: var(--bg2); font-size: 14px; color: var(--hint); }
+.next-up b { color: var(--text); }
+.rules { margin: 0; padding-left: 18px; line-height: 1.45; }
+.rules li { margin-bottom: 6px; }
