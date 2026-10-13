@@ -242,3 +242,5 @@ video { width: 100%; border-radius: 14px; background: #000; margin: 8px 0; }
 .next-up b { color: var(--text); }
 .rules { margin: 0; padding-left: 18px; line-height: 1.45; }
 .rules li { margin-bottom: 6px; }
+.pain-btn { font-size: 14px; font-weight: 600; padding: 12px; margin: 4px 0 8px; }
+.pain-btn:disabled { color: var(--ok); cursor: default; }

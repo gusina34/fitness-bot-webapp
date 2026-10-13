@@ -302,14 +302,16 @@ function plural(n, one, few, many) {
 
 // ---------- Таймер для гимнастики и МФР ----------
 
-const timer = { id: null, index: 0, side: 0, left: 0, running: false, interval: null };
+// total — длительность текущей стороны (больше обычной, если продлили из-за болевых ощущений)
+const timer = { id: null, index: 0, side: 0, left: 0, total: 0, extended: false, running: false, interval: null };
 
 function resetTimer(id, index) {
     stopTimer();
     timer.id = id;
     timer.index = index;
     timer.side = 0;
-    timer.left = WORKOUTS[id].exercises[index].duration;
+    timer.left = timer.total = WORKOUTS[id].exercises[index].duration;
+    timer.extended = false;
 }
 
 function stopTimer() {
@@ -323,7 +325,12 @@ function formatTime(sec) {
 }
 
 function exDurationText(ex) {
-    return ex.sides > 1 ? `${ex.sides} × ${ex.duration} с` : `${ex.duration} с`;
+    const base = ex.sides > 1 ? `${ex.sides} × ${ex.duration} с` : `${ex.duration} с`;
+    return ex.maxDuration ? `${base} (до ${formatMinutes(ex.maxDuration)} при боли)` : base;
+}
+
+function formatMinutes(sec) {
+    return sec % 60 ? formatTime(sec) : `${sec / 60} мин`;
 }
 
 function durationText(workout) {
@@ -726,6 +733,7 @@ const SCREENS = {
                     <div class="timer-side" id="timer-side"></div>
                 </div>
             </div>
+            ${ex.maxDuration ? `<button class="btn secondary pain-btn" id="pain-btn" data-action="timerExtend"></button>` : ''}
             <div class="timer-controls">
                 <button class="link" data-action="timerPrev" ${index === 0 ? 'disabled' : ''}>‹ Предыдущее</button>
                 <button class="link" data-action="timerRestart">↺ Заново</button>
@@ -746,12 +754,19 @@ const SCREENS = {
 
         const update = () => {
             const circumference = 2 * Math.PI * 54;
-            document.getElementById('timer-ring').style.strokeDashoffset = String(circumference * (1 - timer.left / ex.duration));
+            document.getElementById('timer-ring').style.strokeDashoffset = String(circumference * (1 - timer.left / timer.total));
             document.getElementById('timer-value').textContent = formatTime(timer.left);
             document.getElementById('timer-side').textContent = sides > 1
                 ? (timer.side === 0 ? 'Первая сторона' : 'Вторая сторона')
                 : '';
-            const fresh = timer.left === ex.duration && timer.side === 0;
+            const painBtn = document.getElementById('pain-btn');
+            if (painBtn) {
+                painBtn.disabled = timer.extended;
+                painBtn.textContent = timer.extended
+                    ? `✓ Продлено до ${formatMinutes(ex.maxDuration)} — катай медленно`
+                    : `😣 Болит — продлить до ${formatMinutes(ex.maxDuration)}`;
+            }
+            const fresh = timer.left === timer.total && timer.side === 0 && !timer.extended;
             setMainButton(timer.running ? '⏸ Пауза' : fresh ? '▶ Старт' : '▶ Продолжить', toggle);
         };
 
@@ -761,7 +776,8 @@ const SCREENS = {
             if (timer.left > 0) return update();
             if (timer.side < sides - 1) {
                 timer.side += 1;
-                timer.left = ex.duration;
+                timer.left = timer.total = ex.duration;
+                timer.extended = false;
                 beep(990, 250);
                 haptic('success');
                 document.getElementById('timer-side').classList.add('flash');
@@ -793,6 +809,16 @@ const SCREENS = {
             }
         };
 
+        // Болевые ощущения: время этой стороны увеличивается до maxDuration, уже пройденное засчитывается
+        ACTIONS.timerExtend = () => {
+            if (!ex.maxDuration || timer.extended) return;
+            timer.left += ex.maxDuration - timer.total;
+            timer.total = ex.maxDuration;
+            timer.extended = true;
+            haptic();
+            update();
+            if (!timer.running) start();
+        };
         ACTIONS.timerSkip = () => { stopTimer(); goNext(); };
         ACTIONS.timerPrev = () => { if (index > 0) { resetTimer(id, index - 1); go('timed', { id, index: index - 1 }, true); } };
         ACTIONS.timerRestart = () => { resetTimer(id, index); render(); };
