@@ -269,6 +269,10 @@ function humanDate(iso) {
     return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
 }
 
+function signed(value) {
+    return (value > 0 ? '+' : value < 0 ? '−' : '') + formatKg(Math.abs(value));
+}
+
 function formatKg(value) {
     return value.toLocaleString('ru-RU', { maximumFractionDigits: 1 });
 }
@@ -359,6 +363,7 @@ function render() {
     const { screen, params } = stack[stack.length - 1];
     setMainButton(null);
     setBackButton(stack.length > 1);
+    if (typeof Chart !== 'undefined') destroyCharts();
     window.scrollTo(0, 0);
     SCREENS[screen](params);
 }
@@ -494,7 +499,7 @@ const SCREENS = {
             <h2>Мой прогресс</h2>
             <div class="list">
                 ${rowHtml({ emoji: '⚖️', title: 'Дневник веса', sub: 'Записать вес и посмотреть график', go: 'weight', id: '' })}
-                ${rowHtml({ emoji: '📈', title: 'Прогресс в упражнениях', sub: 'Рекорды и история рабочих весов', go: 'records', id: '' })}
+                ${rowHtml({ emoji: '📊', title: 'Мой прогресс', sub: 'Графики веса тела и рабочих весов', go: 'progressAll', id: '' })}
                 <button class="row" data-action="coach"><span class="row-emoji">💬</span><span class="row-body"><div class="row-title">Написать тренеру</div></span><span class="row-arrow">›</span></button>
             </div>`;
     },
@@ -650,6 +655,105 @@ const SCREENS = {
         }).join('')}</div>`;
     },
 
+    // Оба графика на одном экране: вес тела и рабочие веса в выбранном упражнении
+    progressAll() {
+        app.innerHTML = `
+            <h1>📊 Мой прогресс</h1>
+            <div class="chips" id="period">
+                ${[[30, 'Месяц'], [90, '3 месяца'], [0, 'Всё время']].map(([days, title]) =>
+                    `<button class="chip ${progressPeriod === days ? 'active' : ''}" data-action="period" data-id="${days}">${title}</button>`).join('')}
+            </div>
+            <h2>⚖️ Вес тела</h2>
+            <div id="body-weight"><div class="message">Загрузка…</div></div>
+            <h2>🏋️ Рабочие веса</h2>
+            <div id="lifts"><div class="message">Загрузка…</div></div>`;
+
+        ACTIONS.period = el => { progressPeriod = Number(el.dataset.id); render(); };
+        ACTIONS.pickExercise = el => { progressExercise = el.dataset.id; drawLifts(); };
+
+        if (!apiEnabled) {
+            const text = '<div class="message">Открой приложение через бота, чтобы увидеть свой прогресс 🤖</div>';
+            document.getElementById('body-weight').innerHTML = text;
+            document.getElementById('lifts').innerHTML = '';
+            return;
+        }
+
+        const inPeriod = date => !progressPeriod || Date.now() - new Date(date) <= progressPeriod * 864e5;
+        const isCurrent = () => stack[stack.length - 1].screen === 'progressAll';
+
+        // Вес тела
+        (weightEntries ? Promise.resolve(weightEntries) : fetchWeightEntries()).then(entries => {
+            if (!isCurrent()) return;
+            const el = document.getElementById('body-weight');
+            const shown = entries.filter(e => inPeriod(e.date));
+            if (shown.length === 0) {
+                el.innerHTML = `<div class="card empty">${entries.length ? 'За этот период замеров нет' : 'Пока нет замеров'}<br><button class="link" data-go="weight">⚖️ Записать вес</button></div>`;
+                return;
+            }
+            const first = shown[0].weight;
+            const last = shown[shown.length - 1].weight;
+            const diff = last - first;
+            el.innerHTML = `
+                <div class="stats">
+                    <div class="stat"><div class="stat-value">${formatKg(first)}</div><div class="stat-label">было, кг</div></div>
+                    <div class="stat"><div class="stat-value">${formatKg(last)}</div><div class="stat-label">сейчас, кг</div></div>
+                    <div class="stat"><div class="stat-value">${signed(diff)}</div><div class="stat-label">изменение</div></div>
+                </div>
+                ${shown.length > 1 ? '<div class="card"><canvas id="body-chart"></canvas></div>' : '<p class="hint">График появится после второго замера</p>'}
+                <button class="link" data-go="weight">⚖️ Записать вес</button>`;
+            if (shown.length > 1) {
+                lineChart(document.getElementById('body-chart'),
+                    shown.map(e => e.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })),
+                    shown.map(e => e.weight),
+                    v => formatKg(v) + ' кг');
+            }
+        }).catch(error => {
+            console.error('Вес тела:', error);
+            if (isCurrent()) document.getElementById('body-weight').innerHTML = '<div class="message">Не получилось загрузить вес 😢</div>';
+        });
+
+        // Рабочие веса
+        const drawLifts = () => {
+            const el = document.getElementById('lifts');
+            if (!el) return;
+            const names = Object.keys(exerciseLog)
+                .filter(name => exerciseLog[name].some(s => inPeriod(s.date)))
+                .sort((a, b) => new Date(lastSession(b).date) - new Date(lastSession(a).date));
+            if (names.length === 0) {
+                el.innerHTML = `<div class="card empty">${Object.keys(exerciseLog).length ? 'За этот период тренировок с записанными весами нет' : 'Вписывай вес и повторы во время тренировки — здесь появится график'}</div>`;
+                return;
+            }
+            if (!names.includes(progressExercise)) progressExercise = names[0];
+            const series = exerciseSeries(progressExercise, inPeriod);
+            const { points, byWeight, record } = series;
+            const fmt = v => (v === null || v === undefined ? '—' : byWeight ? formatKg(v) : String(v));
+            const unit = byWeight ? 'кг' : 'повт.';
+            el.innerHTML = `
+                <div class="chips scroll">
+                    ${names.map(name => `<button class="chip ${name === progressExercise ? 'active' : ''}" data-action="pickExercise" data-id="${escapeHtml(name)}">${escapeHtml(name)}</button>`).join('')}
+                </div>
+                <div class="stats">
+                    <div class="stat"><div class="stat-value">${fmt(points[0] && points[0].best.value)}</div><div class="stat-label">было, ${unit}</div></div>
+                    <div class="stat"><div class="stat-value">${fmt(points.length ? points[points.length - 1].best.value : null)}</div><div class="stat-label">сейчас, ${unit}</div></div>
+                    <div class="stat"><div class="stat-value">${fmt(record && record.value)}</div><div class="stat-label">рекорд 🏆</div></div>
+                </div>
+                ${points.length > 1 ? '<div class="card"><canvas id="lift-chart"></canvas></div>' : '<p class="hint">График появится после второй тренировки с этим упражнением</p>'}
+                <button class="link" data-go="exerciseProgress" data-id="${escapeHtml(progressExercise)}">📋 Вся история упражнения</button><br>
+                <button class="link" data-go="records">🏆 Все упражнения и рекорды</button>`;
+            if (points.length > 1) {
+                lineChart(document.getElementById('lift-chart'),
+                    points.map(s => new Date(s.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })),
+                    points.map(s => s.best.value),
+                    v => byWeight ? formatKg(v) + ' кг' : v + ' повт.');
+            }
+        };
+        loadExerciseLog().then(() => {
+            if (!isCurrent()) return;
+            if (logLoaded) drawLifts();
+            else document.getElementById('lifts').innerHTML = '<div class="message">Не получилось загрузить данные 😢</div>';
+        });
+    },
+
     exerciseProgress({ id: name }) {
         app.innerHTML = `
             <h1>${escapeHtml(name)}</h1>
@@ -670,19 +774,8 @@ const SCREENS = {
             return;
         }
 
-        const record = personalRecord(list);
-        const byWeight = record ? record.byWeight : false;
+        const { sessions, points, byWeight, record } = exerciseSeries(name);
         const unit = byWeight ? 'кг' : 'повт.';
-        // Лучший результат каждой тренировки и отметка, был ли он рекордом на тот момент
-        let max = -Infinity;
-        const sessions = list.map(s => {
-            const best = sessionBest(s.sets);
-            const comparable = best && best.byWeight === byWeight;
-            const isRecord = comparable && best.value > max && max !== -Infinity;
-            if (comparable) max = Math.max(max, best.value);
-            return { ...s, best: comparable ? best : null, isRecord };
-        });
-        const points = sessions.filter(s => s.best);
         const first = points[0] && points[0].best.value;
         const last = points.length ? points[points.length - 1].best.value : null;
         const fmt = v => (v === null || v === undefined ? '—' : byWeight ? formatKg(v) : String(v));
@@ -740,7 +833,38 @@ const SCREENS = {
 
 // ---------- Дневник веса (Google Таблица через Apps Script) ----------
 
-let chart;
+let weightEntries = null;
+let progressPeriod = 0;
+let progressExercise = null;
+
+// Лучший результат каждой тренировки и отметка, был ли он рекордом на тот момент
+function exerciseSeries(name, filter = () => true) {
+    const list = exerciseLog[name] || [];
+    const record = personalRecord(list);
+    const byWeight = record ? record.byWeight : false;
+    let max = -Infinity;
+    const sessions = list.map(s => {
+        const best = sessionBest(s.sets);
+        const comparable = best && best.byWeight === byWeight;
+        const isRecord = comparable && best.value > max && max !== -Infinity;
+        if (comparable) max = Math.max(max, best.value);
+        return { ...s, best: comparable ? best : null, isRecord };
+    });
+    const points = sessions.filter(s => s.best && filter(s.date));
+    return { sessions, points, byWeight, record };
+}
+
+async function fetchWeightEntries(newWeight) {
+    const data = newWeight
+        ? await api('POST', { action: 'weight', weight: newWeight })
+        : await api('GET');
+    if (!Array.isArray(data)) throw new Error('Неверный ответ');
+    weightEntries = data
+        .map(row => ({ date: new Date(row.date), weight: parseFloat(String(row.weight).replace(',', '.')) }))
+        .filter(e => !isNaN(e.date) && !isNaN(e.weight))
+        .sort((a, b) => a.date - b.date);
+    return weightEntries;
+}
 
 async function loadWeights(newWeight) {
     const body = document.getElementById('weight-body');
@@ -755,16 +879,7 @@ async function loadWeights(newWeight) {
     body.innerHTML = `<div class="message">${newWeight ? 'Сохраняю…' : 'Загрузка…'}</div>`;
 
     try {
-        const data = newWeight
-            ? await api('POST', { action: 'weight', weight: newWeight })
-            : await api('GET');
-        if (!Array.isArray(data)) throw new Error('Неверный ответ');
-
-        const entries = data
-            .map(row => ({ date: new Date(row.date), weight: parseFloat(String(row.weight).replace(',', '.')) }))
-            .filter(e => !isNaN(e.date) && !isNaN(e.weight))
-            .sort((a, b) => a.date - b.date);
-
+        const entries = await fetchWeightEntries(newWeight);
         if (newWeight) haptic('success');
         renderWeights(entries);
     } catch (error) {
@@ -788,7 +903,7 @@ function renderWeights(entries) {
         <div class="stats">
             <div class="stat"><div class="stat-value">${formatKg(entries[0].weight)}</div><div class="stat-label">старт</div></div>
             <div class="stat"><div class="stat-value">${formatKg(lastWeight)}</div><div class="stat-label">сейчас</div></div>
-            <div class="stat"><div class="stat-value">${diff > 0 ? '+' : ''}${formatKg(diff)}</div><div class="stat-label">изменение</div></div>
+            <div class="stat"><div class="stat-value">${signed(diff)}</div><div class="stat-label">изменение</div></div>
         </div>
         ${entries.length > 1 ? '<div class="card"><canvas id="weight-chart"></canvas></div>' : ''}
         <h2>История</h2>
@@ -808,13 +923,20 @@ function renderWeights(entries) {
     }
 }
 
+const charts = [];
+
+function destroyCharts() {
+    while (charts.length) charts.pop().destroy();
+}
+
 function lineChart(canvas, labels, values, formatValue) {
     if (typeof Chart === 'undefined' || !canvas) return;
     const theme = (tg && tg.themeParams) || {};
     const color = theme.button_color || '#e0567a';
     const textColor = theme.hint_color || '#8e8e93';
-    if (chart) chart.destroy();
-    chart = new Chart(canvas, {
+    const existing = Chart.getChart(canvas);
+    if (existing) existing.destroy();
+    charts.push(new Chart(canvas, {
         type: 'line',
         data: {
             labels,
@@ -835,11 +957,11 @@ function lineChart(canvas, labels, values, formatValue) {
                 tooltip: { callbacks: { label: ctx => formatValue(ctx.parsed.y) } }
             },
             scales: {
-                x: { ticks: { color: textColor }, grid: { display: false } },
-                y: { ticks: { color: textColor }, grid: { color: textColor + '33' } }
+                x: { ticks: { color: textColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 5 }, grid: { display: false } },
+                y: { ticks: { color: textColor, maxTicksLimit: 6 }, grid: { color: textColor + '33' } }
             }
         }
-    });
+    }));
 }
 
 // ---------- Старт ----------
