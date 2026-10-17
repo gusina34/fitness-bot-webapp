@@ -244,3 +244,20 @@ video { width: 100%; border-radius: 14px; background: #000; margin: 8px 0; }
 .rules li { margin-bottom: 6px; }
 .pain-btn { font-size: 14px; font-weight: 600; padding: 12px; margin: 4px 0 8px; }
 .pain-btn:disabled { color: var(--ok); cursor: default; }
+.timer.resting .timer-ring { stroke: var(--ok); }
+.rest-label {
+    display: inline-block; margin: 4px 0 -4px; padding: 4px 10px; border-radius: 20px;
+    background: #34c75922; color: var(--ok); font-size: 13px; font-weight: 600;
+}
+
+/* Бесплатный режим */
+.locked { position: relative; opacity: .6; }
+.locked .row-arrow { visibility: hidden; }
+.locked::after { content: '🔒'; position: absolute; right: 12px; top: 12px; font-size: 14px; }
+.row.locked::after { top: 50%; transform: translateY(-50%); }
+.gift-banner { background: linear-gradient(135deg, #e0567a, #f08a5d); color: #fff; }
+.unlock-banner { margin-top: 10px; background: var(--bg2); color: var(--text); }
+.unlock-banner .banner-sub { color: var(--hint); opacity: 1; }
+.features { list-style: none; margin: 0; padding: 0; line-height: 1.5; }
+.features li { padding: 6px 0; }
+.price { text-align: center; font-size: 28px; font-weight: 800; margin: 18px 0 6px; }

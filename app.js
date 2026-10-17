@@ -54,6 +54,7 @@ async function loadProgress() {
     } catch (e) { /* пусто или повреждено — начинаем с нуля */ }
     lastWeight = parseFloat(await store.get('lastWeight')) || null;
     lastWeightDate = await store.get('lastWeightDate');
+    try { access = Object.assign(access, JSON.parse(await store.get('access')) || {}); } catch (e) { /* нет кэша */ }
 }
 
 function rememberLastWeight(weight, date) {
@@ -303,14 +304,17 @@ function plural(n, one, few, many) {
 // ---------- Таймер для гимнастики и МФР ----------
 
 // total — длительность текущей стороны (больше обычной, если продлили из-за болевых ощущений)
-const timer = { id: null, index: 0, side: 0, left: 0, total: 0, extended: false, running: false, interval: null };
+// phase: 'work' — упражнение, 'rest' — отдых перед ним; round — номер круга (с нуля)
+const timer = { id: null, index: 0, round: 0, phase: 'work', side: 0, left: 0, total: 0, extended: false, running: false, interval: null };
 
-function resetTimer(id, index) {
+function resetTimer(id, index, phase = 'work', rest = 0) {
     stopTimer();
+    if (timer.id !== id) timer.round = 0;
     timer.id = id;
     timer.index = index;
     timer.side = 0;
-    timer.left = timer.total = WORKOUTS[id].exercises[index].duration;
+    timer.phase = phase === 'rest' && rest > 0 ? 'rest' : 'work';
+    timer.left = timer.total = timer.phase === 'rest' ? rest : WORKOUTS[id].exercises[index].duration;
     timer.extended = false;
 }
 
@@ -334,7 +338,11 @@ function formatMinutes(sec) {
 }
 
 function durationText(workout) {
-    const sec = workout.exercises.reduce((sum, ex) => sum + (ex.duration || 0) * (ex.sides || 1), 0);
+    const rounds = workout.rounds || 1;
+    const work = workout.exercises.reduce((sum, ex) => sum + (ex.duration || 0) * (ex.sides || 1), 0);
+    const sec = work * rounds
+        + (workout.rest || 0) * (workout.exercises.length - 1) * rounds
+        + (workout.roundRest || workout.rest || 0) * (rounds - 1);
     return sec ? `≈ ${Math.max(1, Math.round(sec / 60))} мин` : '';
 }
 
@@ -416,11 +424,47 @@ function setBackButton(visible) {
     else pageBack.hidden = !visible;
 }
 
+// ---------- Доступ по подписке ----------
+
+// until — до какого момента оплачено (ISO); сервер присылает при каждом открытии приложения
+let access = { until: null };
+const FREE_SCREENS = new Set(['home', 'nutrition', 'profile', 'plan', 'recipe', 'pregnant', 'paywall', 'finish']);
+
+function hasAccess() {
+    return !CONFIG.paywall || (!!access.until && new Date(access.until) > new Date());
+}
+
+function isLocked(screen, params = {}) {
+    if (hasAccess() || FREE_SCREENS.has(screen)) return false;
+    const workout = WORKOUTS[params.id];
+    return !((screen === 'workout' || screen === 'timed') && workout && workout.free);
+}
+
+function saveAccess(data) {
+    access = { until: data && data.until ? data.until : null };
+    store.set('access', JSON.stringify(access));
+}
+
+// Замочки на кнопках, которые ведут в платные разделы
+function markLocked() {
+    if (hasAccess()) return;
+    app.querySelectorAll('[data-go]').forEach(el => {
+        if (isLocked(el.dataset.go, { id: el.dataset.id })) el.classList.add('locked');
+    });
+}
+
+// Экраны, которые дорисовываются после загрузки данных, тоже получают замочки
+new MutationObserver(markLocked).observe(app, { childList: true, subtree: true });
+
 // ---------- Навигация ----------
 
 const stack = [];
 
 function go(screen, params = {}, replace = false) {
+    if (isLocked(screen, params)) {
+        screen = 'paywall';
+        params = {};
+    }
     if (replace) stack.pop();
     stack.push({ screen, params });
     render();
@@ -445,6 +489,7 @@ function render() {
     if (typeof Chart !== 'undefined') destroyCharts();
     window.scrollTo(0, 0);
     SCREENS[screen](params);
+    markLocked();
 }
 
 // Делегирование кликов: data-go="screen" data-id="..." / data-action="..."
@@ -547,12 +592,27 @@ function rowHtml({ emoji, title, sub, go, id, done }) {
 
 const SCREENS = {
     home() {
-        const { warmup, cooldown } = DATA.extras;
+        const { warmup, cooldown, gift } = DATA.extras;
         const name = user && user.first_name ? `, ${escapeHtml(user.first_name)}` : '';
         app.innerHTML = `
             <h1>Привет${name}! 💪</h1>
-            <p class="hint">Выбери, где тренируемся сегодня</p>
-            ${CONFIG.googleScriptUrl && weighInDue() ? `
+            <p class="hint">${CONFIG.paywall && hasAccess() && access.until ? `Подписка активна до ${new Date(access.until).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}` : 'Выбери, где тренируемся сегодня'}</p>
+            ${!hasAccess() ? `
+                <button class="banner gift-banner" data-go="workout" data-id="${gift.id}">
+                    <span class="row-emoji">🎁</span>
+                    <span class="row-body"><div class="row-title">Твой подарок: ${escapeHtml(gift.title)}</div><div class="banner-sub">Тренировка на ягодицы с таймером · ${durationText(gift)}</div></span>
+                    <span>›</span>
+                </button>
+                <div class="list" style="margin-top:8px">
+                    ${rowHtml({ emoji: '🧮', title: 'Моя норма КБЖУ и рацион', sub: 'Рассчитай калории и получи меню на день', go: 'nutrition', id: '' })}
+                </div>
+                <button class="banner unlock-banner" data-go="paywall">
+                    <span class="row-emoji">🔓</span>
+                    <span class="row-body"><div class="row-title">Открыть всё</div><div class="banner-sub">Программы, дневник весов, рацион каждый день · ${escapeHtml(CONFIG.price)}</div></span>
+                    <span>›</span>
+                </button>
+                <h2>В полной версии</h2>` : ''}
+            ${CONFIG.googleScriptUrl && hasAccess() && weighInDue() ? `
                 <button class="banner" data-go="weight">
                     <span class="row-emoji">⚖️</span>
                     <span class="row-body"><div class="row-title">Пора взвеситься</div><div class="banner-sub">${lastWeightDate ? 'Прошла неделя с последнего замера' : 'Запиши свой стартовый вес'}</div></span>
@@ -572,6 +632,7 @@ const SCREENS = {
             </div>
             <h2>Разминка и восстановление</h2>
             <div class="list">
+                ${hasAccess() ? rowHtml({ emoji: gift.emoji, title: gift.title, sub: `Тренировка на ягодицы с таймером · ${durationText(gift)}`, go: 'workout', id: gift.id }) : ''}
                 ${rowHtml({ emoji: warmup.emoji, title: warmup.title, sub: `${warmup.subtitle || 'Перед тренировкой'} · ${durationText(warmup)}`, go: 'workout', id: warmup.id })}
                 ${rowHtml({ emoji: cooldown.emoji, title: cooldown.title, sub: `${cooldown.subtitle || 'После тренировки'} · ${durationText(cooldown)}`, go: 'workout', id: cooldown.id })}
             </div>
@@ -676,13 +737,53 @@ const SCREENS = {
         });
     },
 
+    paywall() {
+        app.innerHTML = `
+            <div class="finish">
+                <div class="finish-emoji">🔓</div>
+                <h1>Открой полную версию</h1>
+                <p class="hint">Всё для красивых ягодиц и здорового питания — в одном приложении</p>
+            </div>
+            <div class="card">
+                <ul class="features">
+                    <li>🏋️ Программы тренировок в зале и дома</li>
+                    <li>📝 Дневник рабочих весов, рекорды и графики прогресса</li>
+                    <li>🥗 Рацион каждый день под твою норму и рецепты с КБЖУ</li>
+                    <li>📅 Трекер воды, белка, углеводов и калорий</li>
+                    <li>⚖️ Дневник веса с еженедельными напоминаниями</li>
+                    <li>🤸 Разминка и 🌀 МФР с таймером</li>
+                    <li>💬 Связь с тренером</li>
+                </ul>
+            </div>
+            <div class="price">${escapeHtml(CONFIG.price)}</div>
+            <p class="hint" style="text-align:center">Нажми кнопку — откроется бот, там выбери тариф и оплати.<br>После оплаты вернись сюда и нажми «Я оплатила».</p>
+            <button class="btn secondary" data-action="refreshAccess">🔄 Я оплатила — проверить</button>
+            <button class="link" data-action="coach" style="display:block;margin:8px auto 0">Вопрос по оплате? Написать тренеру</button>`;
+
+        ACTIONS.refreshAccess = el => {
+            el.disabled = true;
+            el.textContent = 'Проверяю…';
+            checkAccess().then(ok => {
+                if (stack[stack.length - 1].screen !== 'paywall') return;
+                el.disabled = false;
+                el.textContent = '🔄 Я оплатила — проверить';
+                const text = ok
+                    ? `Готово! Доступ открыт до ${new Date(access.until).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })} 🎉`
+                    : 'Оплата пока не найдена. Если ты только что оплатила — подожди минуту и нажми ещё раз. Не получается — напиши тренеру.';
+                inTelegram ? tg.showAlert(text) : alert(text);
+                if (ok) home();
+            });
+        };
+        setMainButton(`Оформить подписку · ${CONFIG.price}`, () => openLink(CONFIG.payLink));
+    },
+
     timedOverview(workout) {
         app.innerHTML = `
             <h1>${workout.emoji} ${escapeHtml(workout.title)}</h1>
             <p class="hint">${escapeHtml(workout.subtitle || '')}</p>
             <div class="tags">
                 <span class="tag">⏱ ${durationText(workout)}</span>
-                <span class="tag">${workout.exercises.length} ${plural(workout.exercises.length, 'упражнение', 'упражнения', 'упражнений')}</span>
+                <span class="tag">${workout.exercises.length} ${plural(workout.exercises.length, 'упражнение', 'упражнения', 'упражнений')}${workout.rounds > 1 ? ` × ${workout.rounds} ${plural(workout.rounds, 'круг', 'круга', 'кругов')}` : ''}</span>
                 ${workout.equipment ? `<span class="tag">🧰 ${escapeHtml(workout.equipment)}</span>` : ''}
             </div>
             ${workout.intro ? `<p class="description">${escapeHtml(workout.intro)}</p>` : ''}
@@ -705,6 +806,7 @@ const SCREENS = {
             </div>
             <p class="hint" style="margin-top:12px">Нажми «Начать» — приложение само поведёт по упражнениям: таймер, смена сторон и переход к следующему. Телефон можно положить рядом.</p>`;
         setMainButton('Начать ▶', () => {
+            timer.id = null;
             resetTimer(workout.id, 0);
             go('timed', { id: workout.id, index: 0 });
         });
@@ -714,16 +816,22 @@ const SCREENS = {
         const workout = WORKOUTS[id];
         const ex = workout.exercises[index];
         const sides = ex.sides || 1;
-        const next = workout.exercises[index + 1];
+        const rounds = workout.rounds || 1;
+        const isLastInRound = index === workout.exercises.length - 1;
         const isMp4 = ex.video && /\.mp4(\?|$)/i.test(ex.video);
         if (timer.id !== id || timer.index !== index) resetTimer(id, index);
+        const isRest = () => timer.phase === 'rest';
+        const upcoming = isLastInRound
+            ? (timer.round < rounds - 1 ? { ex: workout.exercises[0], text: `Круг ${timer.round + 2}: ` } : null)
+            : { ex: workout.exercises[index + 1], text: '' };
 
         app.innerHTML = `
-            <p class="hint" style="margin:0">${escapeHtml(workout.title)} · ${index + 1} из ${workout.exercises.length}</p>
-            <div class="progress"><div style="width:${((index + 1) / workout.exercises.length) * 100}%"></div></div>
+            <p class="hint" style="margin:0">${escapeHtml(workout.title)}${rounds > 1 ? ` · круг ${timer.round + 1} из ${rounds}` : ''} · ${index + 1} из ${workout.exercises.length}</p>
+            <div class="progress"><div style="width:${((timer.round * workout.exercises.length + index + 1) / (rounds * workout.exercises.length)) * 100}%"></div></div>
+            <div class="rest-label" id="rest-label" hidden>Отдых — приготовься к упражнению</div>
             <h1>${escapeHtml(ex.name)}</h1>
             ${ex.equipment ? `<div class="tags"><span class="tag">🧰 ${escapeHtml(ex.equipment)}</span></div>` : ''}
-            <div class="timer">
+            <div class="timer" id="timer-box">
                 <svg viewBox="0 0 120 120" aria-hidden="true">
                     <circle class="timer-track" cx="60" cy="60" r="54"></circle>
                     <circle class="timer-ring" id="timer-ring" cx="60" cy="60" r="54"></circle>
@@ -737,36 +845,57 @@ const SCREENS = {
             <div class="timer-controls">
                 <button class="link" data-action="timerPrev" ${index === 0 ? 'disabled' : ''}>‹ Предыдущее</button>
                 <button class="link" data-action="timerRestart">↺ Заново</button>
-                <button class="link" data-action="timerSkip">${next ? 'Пропустить ›' : 'Завершить ›'}</button>
+                <button class="link" data-action="timerSkip" id="skip-btn"></button>
             </div>
             ${isMp4 ? `<video src="${escapeHtml(ex.video)}" controls playsinline preload="metadata"></video>` : ''}
             ${ex.video && !isMp4 ? `<button class="btn secondary" data-action="video" data-url="${escapeHtml(ex.video)}">▶ Смотреть видео</button>` : ''}
             ${ex.description ? `<p class="description">${escapeHtml(ex.description)}</p>` : ''}
-            <div class="next-up">${next ? `Дальше: <b>${escapeHtml(next.name)}</b> · ${exDurationText(next)}` : 'Это последнее упражнение 💪'}</div>`;
+            <div class="next-up">${upcoming ? `Дальше: ${upcoming.text}<b>${escapeHtml(upcoming.ex.name)}</b> · ${exDurationText(upcoming.ex)}` : 'Это последнее упражнение 💪'}</div>`;
 
+        // Следующее упражнение (с отдыхом перед ним), следующий круг или финиш
         const goNext = () => {
-            if (next) go('timed', { id, index: index + 1 }, true);
-            else {
+            if (!isLastInRound) {
+                resetTimer(id, index + 1, 'rest', workout.rest);
+                go('timed', { id, index: index + 1 }, true);
+            } else if (timer.round < rounds - 1) {
+                timer.round += 1;
+                resetTimer(id, 0, 'rest', workout.roundRest || workout.rest);
+                go('timed', { id, index: 0 }, true);
+            } else {
                 timer.running = false;
+                timer.id = null;
                 go('finish', { id }, true);
             }
+        };
+
+        const startWork = () => {
+            timer.phase = 'work';
+            timer.side = 0;
+            timer.left = timer.total = ex.duration;
+            timer.extended = false;
         };
 
         const update = () => {
             const circumference = 2 * Math.PI * 54;
             document.getElementById('timer-ring').style.strokeDashoffset = String(circumference * (1 - timer.left / timer.total));
             document.getElementById('timer-value').textContent = formatTime(timer.left);
-            document.getElementById('timer-side').textContent = sides > 1
-                ? (timer.side === 0 ? 'Первая сторона' : 'Вторая сторона')
-                : '';
+            document.getElementById('timer-box').classList.toggle('resting', isRest());
+            document.getElementById('rest-label').hidden = !isRest();
+            document.getElementById('timer-side').textContent = isRest()
+                ? (timer.index === 0 && timer.round > 0 ? `Отдых перед кругом ${timer.round + 1}` : 'Отдых')
+                : sides > 1 ? (timer.side === 0 ? 'Первая сторона' : 'Вторая сторона') : '';
+            document.getElementById('skip-btn').textContent = isRest()
+                ? 'Начать сразу ›'
+                : upcoming ? 'Пропустить ›' : 'Завершить ›';
             const painBtn = document.getElementById('pain-btn');
             if (painBtn) {
+                painBtn.hidden = isRest();
                 painBtn.disabled = timer.extended;
                 painBtn.textContent = timer.extended
                     ? `✓ Продлено до ${formatMinutes(ex.maxDuration)} — катай медленно`
                     : `😣 Болит — продлить до ${formatMinutes(ex.maxDuration)}`;
             }
-            const fresh = timer.left === timer.total && timer.side === 0 && !timer.extended;
+            const fresh = timer.left === timer.total && timer.side === 0 && !timer.extended && !isRest();
             setMainButton(timer.running ? '⏸ Пауза' : fresh ? '▶ Старт' : '▶ Продолжить', toggle);
         };
 
@@ -774,6 +903,12 @@ const SCREENS = {
             timer.left -= 1;
             if (timer.left > 0 && timer.left <= 3) { beep(660, 80); haptic(); }
             if (timer.left > 0) return update();
+            if (isRest()) {
+                startWork();
+                beep(990, 250);
+                haptic('success');
+                return update();
+            }
             if (timer.side < sides - 1) {
                 timer.side += 1;
                 timer.left = timer.total = ex.duration;
@@ -811,7 +946,7 @@ const SCREENS = {
 
         // Болевые ощущения: время этой стороны увеличивается до maxDuration, уже пройденное засчитывается
         ACTIONS.timerExtend = () => {
-            if (!ex.maxDuration || timer.extended) return;
+            if (!ex.maxDuration || timer.extended || isRest()) return;
             timer.left += ex.maxDuration - timer.total;
             timer.total = ex.maxDuration;
             timer.extended = true;
@@ -819,9 +954,21 @@ const SCREENS = {
             update();
             if (!timer.running) start();
         };
-        ACTIONS.timerSkip = () => { stopTimer(); goNext(); };
-        ACTIONS.timerPrev = () => { if (index > 0) { resetTimer(id, index - 1); go('timed', { id, index: index - 1 }, true); } };
-        ACTIONS.timerRestart = () => { resetTimer(id, index); render(); };
+        ACTIONS.timerSkip = () => {
+            if (isRest()) {
+                startWork();
+                update();
+                return;
+            }
+            stopTimer();
+            goNext();
+        };
+        ACTIONS.timerPrev = () => {
+            if (index === 0) return;
+            resetTimer(id, index - 1);
+            go('timed', { id, index: index - 1 }, true);
+        };
+        ACTIONS.timerRestart = () => { startWork(); stopTimer(); update(); if (timer.running) start(); };
 
         update();
         if (timer.running) start();
@@ -1199,16 +1346,31 @@ function lineChart(canvas, labels, values, formatValue) {
 
 // Регистрируем клиента для еженедельных напоминаний и узнаём дату последнего замера
 function hello() {
-    if (!apiEnabled) return;
-    api('POST', { action: 'hello' })
+    if (!apiEnabled) return Promise.resolve(null);
+    return api('POST', { action: 'hello' })
         .then(data => {
-            if (!data.lastWeightDate) return;
+            if (data.access) {
+                const before = hasAccess();
+                saveAccess(data.access);
+                const screen = stack.length && stack[stack.length - 1].screen;
+                if (before !== hasAccess() && (screen === 'home' || screen === 'paywall')) render();
+            }
+            if (!data.lastWeightDate) return data;
             const date = new Date(data.lastWeightDate);
-            if (lastWeightDate && isoDate(date) <= lastWeightDate) return;
+            if (lastWeightDate && isoDate(date) <= lastWeightDate) return data;
             rememberLastWeight(data.lastWeight, date);
             if (stack.length && stack[stack.length - 1].screen === 'home') render();
+            return data;
         })
-        .catch(error => console.error('Регистрация клиента:', error));
+        .catch(error => {
+            console.error('Регистрация клиента:', error);
+            return null;
+        });
+}
+
+// Повторная проверка подписки (кнопка «Я оплатила»)
+function checkAccess() {
+    return hello().then(() => hasAccess());
 }
 
 loadProgress().then(() => {
@@ -1218,7 +1380,8 @@ loadProgress().then(() => {
     // или ссылка t.me/Nina_fitbody_bot/app?startapp=weight
     const start = new URLSearchParams(location.search).get('open') || (inTelegram && tg.initDataUnsafe.start_param);
     home();
-    if (start === 'weight') go('weight');
+    if (start === 'gift') go('workout', { id: 'gift' });
+    else if (start === 'weight') go('weight');
     else if (start === 'nutrition' || start === 'day') go(start);
     else if (start && WORKOUTS[start]) go('workout', { id: start });
 });

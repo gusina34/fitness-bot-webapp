@@ -6,7 +6,10 @@
  *   • рабочие веса в упражнениях, рекорды и история (лист «Тренировки», создаётся сам);
  *   • список клиентов, открывавших приложение (лист «Клиенты», создаётся сам);
  *   • питание за день: вода, белок, углеводы, потраченные и съеденные калории (лист «Питание», создаётся сам);
- *   • еженедельное напоминание взвеситься — сообщение от бота с кнопкой «Записать вес».
+ *   • еженедельное напоминание взвеситься — сообщение от бота с кнопкой «Записать вес»;
+ *   • подписка: лист «Оплаты» (создаётся сам). Leadteh после оплаты добавляет строку с telegram_id,
+ *     дату можно не заполнять — скрипт поставит её сам, когда клиентка откроет приложение.
+ *     Доступ — 30 дней с даты оплаты (или сколько указано в столбце «дней»), продления складываются.
  *
  * Telegram подписывает данные пользователя токеном бота. Скрипт проверяет подпись,
  * поэтому каждый клиент видит и записывает только свои данные.
@@ -29,6 +32,9 @@ const WEIGHT_SHEET = ''; // пусто = первый лист
 const LOG_SHEET = 'Тренировки';
 const CLIENTS_SHEET = 'Клиенты';
 const FOOD_SHEET = 'Питание';
+const PAY_SHEET = 'Оплаты';
+const PAY_HEADERS = ['telegram_id', 'дата оплаты', 'дней', 'комментарий'];
+const DEFAULT_DAYS = 30; // на сколько дней открывается доступ, если столбец «дней» пустой
 const FOOD_HEADERS = ['telegram_id', 'имя', 'дата', 'вода, мл', 'белок, г', 'углеводы, г', 'потрачено, ккал', 'съедено, ккал'];
 const LOG_HEADERS = ['telegram_id', 'имя', 'дата', 'тренировка', 'упражнение', 'подход', 'вес, кг', 'повторы'];
 const CLIENT_HEADERS = ['telegram_id', 'имя', 'username', 'первый вход', 'последний вход', 'напоминания'];
@@ -238,7 +244,54 @@ function hello_(user) {
     .filter(w => !isNaN(w.date) && !isNaN(w.weight))
     .sort((a, b) => a.date - b.date);
   const last = weights[weights.length - 1];
-  return last ? { lastWeight: last.weight, lastWeightDate: last.date.toISOString() } : {};
+  const result = { access: accessFor_(user.id) };
+  if (last) {
+    result.lastWeight = last.weight;
+    result.lastWeightDate = last.date.toISOString();
+  }
+  return result;
+}
+
+// ---- Подписка ----
+
+// До какого числа оплачен доступ. Каждая оплата добавляет свои дни; продление до окончания — прибавляется к сроку.
+function accessFor_(userId) {
+  const sheet = sheetByName_(PAY_SHEET, PAY_HEADERS);
+  const rows = sheet.getDataRange().getValues();
+  const payments = [];
+  rows.forEach((r, i) => {
+    if (i === 0 || String(r[0]).trim() !== String(userId)) return;
+    let date = r[1] === '' ? null : parseDate_(r[1]);
+    if (!date) {
+      // Строка без даты (так её может добавить Leadteh) — считаем днём оплаты сегодняшний день
+      date = new Date();
+      sheet.getRange(i + 1, 2).setValue(date);
+    }
+    const days = Number(r[2]) > 0 ? Number(r[2]) : DEFAULT_DAYS;
+    payments.push({ date: date, days: days });
+  });
+
+  payments.sort((a, b) => a.date - b.date);
+  let until = null;
+  payments.forEach(p => {
+    const start = until && until > p.date ? until : p.date;
+    until = new Date(start.getTime() + p.days * DAY_MS);
+  });
+  return { until: until ? until.toISOString() : null };
+}
+
+// Запустите один раз перед включением бесплатного режима: всем, кто уже есть в листе «Клиенты»
+// (то есть уже пользуется приложением), выдаётся доступ на 30 дней с сегодняшнего дня.
+function grantAccessToCurrentClients() {
+  const clients = sheetByName_(CLIENTS_SHEET, CLIENT_HEADERS).getDataRange().getValues().slice(1);
+  const sheet = sheetByName_(PAY_SHEET, PAY_HEADERS);
+  const existing = new Set(sheet.getDataRange().getValues().slice(1).map(r => String(r[0]).trim()));
+  const now = new Date();
+  const rows = clients
+    .filter(c => c[0] && !existing.has(String(c[0]).trim()))
+    .map(c => [String(c[0]), now, DEFAULT_DAYS, 'перенос: ' + c[1]]);
+  if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, PAY_HEADERS.length).setValues(rows);
+  Logger.log('Выдан доступ клиентам: %s', rows.length);
 }
 
 // ================= Напоминания =================
