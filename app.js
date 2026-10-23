@@ -228,6 +228,33 @@ function logExercise(workout, index) {
     flushLogs();
 }
 
+// Запись всех подходов, отметка о тренировке и экран «Тренировка завершена»
+function completeWorkout(workout) {
+    let sets = 0;
+    let records = [];
+    if (workout.counts) {
+        workout.exercises.forEach((_, i) => logExercise(workout, i));
+        sets = loggedSetsCount;
+        records = newRecords.slice();
+        clearSession(workout);
+        markDone(workout.id);
+    }
+    go('finish', { id: workout.id, sets, records }, true);
+}
+
+// «4 подхода × 12 · отдых 1:30»
+function setsSummary(workout, index) {
+    const ex = workout.exercises[index];
+    const plan = parseSets(ex.sets);
+    const what = ex.time ? `${ex.time} с` : plan.reps ? `${plan.reps} повт.` : '';
+    return `${plan.sets} ${plural(plan.sets, 'подход', 'подхода', 'подходов')}${what ? ' × ' + what : ''} · отдых ${formatTime(restFor(workout, ex))}`;
+}
+
+const DEFAULT_REST = 90;
+function restFor(workout, ex) {
+    return ex.rest || workout.rest || (workout.program && workout.program.rest) || DEFAULT_REST;
+}
+
 function clearSession(workout) {
     Object.keys(session).filter(k => k.startsWith(workout.id + ':')).forEach(k => {
         delete session[k];
@@ -480,8 +507,16 @@ function home() {
     go('home');
 }
 
+// Экран может оставить функцию уборки (таймеры, видео) — она вызывается при уходе с него
+let screenCleanup = null;
+
 function render() {
     const { screen, params } = stack[stack.length - 1];
+    if (screenCleanup) {
+        const cleanup = screenCleanup;
+        screenCleanup = null;
+        cleanup();
+    }
     setMainButton(null);
     setBackButton(stack.length > 1);
     stopTimer();
@@ -669,15 +704,15 @@ const SCREENS = {
             ${workout.counts ? `<div class="list" style="margin-bottom:16px">${rowHtml({ emoji: warmup.emoji, title: `Сначала: ${warmup.title}`, go: 'workout', id: warmup.id })}</div>` : ''}
             <div class="list">
                 ${workout.exercises.map((ex, i) => `
-                    <button class="row" data-go="exercise" data-id="${workout.id}" data-index="${i}">
+                    <button class="row" data-go="stories" data-id="${workout.id}" data-index="${i}">
                         <span class="check">${i + 1}</span>
-                        <span class="row-body"><div class="row-title">${escapeHtml(ex.name)}</div>${ex.sets ? `<div class="row-sub">${escapeHtml(ex.sets)}</div>` : ''}</span>
+                        <span class="row-body"><div class="row-title">${escapeHtml(ex.name)}</div><div class="row-sub">${escapeHtml(setsSummary(workout, i))}</div></span>
                         <span class="row-arrow">›</span>
                     </button>`).join('')}
             </div>
             ${workout.counts ? `<div class="list" style="margin-top:16px">${rowHtml({ emoji: cooldown.emoji, title: `После: ${cooldown.title}`, go: 'workout', id: cooldown.id })}</div>` : ''}`;
         if (workout.counts) loadExerciseLog();
-        setMainButton('Начать ▶', () => go('exercise', { id, index: 0 }));
+        setMainButton('Начать ▶', () => go('stories', { id, index: 0 }));
     },
 
     exercise({ id, index }) {
@@ -720,16 +755,7 @@ const SCREENS = {
         setMainButton(isLast ? 'Завершить тренировку ✅' : 'Следующее ▸', () => {
             haptic();
             if (isLast) {
-                let sets = 0;
-                let records = [];
-                if (workout.counts) {
-                    workout.exercises.forEach((_, i) => logExercise(workout, i));
-                    sets = loggedSetsCount;
-                    records = newRecords.slice();
-                    clearSession(workout);
-                    markDone(workout.id);
-                }
-                go('finish', { id, sets, records }, true);
+                completeWorkout(workout);
             } else {
                 logExercise(workout, index);
                 go('exercise', { id, index: index + 1 }, true);
