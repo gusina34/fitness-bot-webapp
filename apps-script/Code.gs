@@ -7,6 +7,7 @@
  *   • список клиентов, открывавших приложение (лист «Клиенты», создаётся сам);
  *   • питание за день: вода, белок, углеводы, потраченные и съеденные калории (лист «Питание», создаётся сам);
  *   • еженедельное напоминание взвеситься — сообщение от бота с кнопкой «Записать вес»;
+ *   • вход в мобильное приложение Fit & Balance через Telegram (код + подтверждение в боте);
  *   • подписка: лист «Оплаты» (создаётся сам). Leadteh после оплаты добавляет строку с telegram_id,
  *     дату можно не заполнять — скрипт поставит её сам, когда клиентка откроет приложение.
  *     Доступ — 30 дней с даты оплаты (или сколько указано в столбце «дней»), продления складываются.
@@ -53,8 +54,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ================= Приложение =================
 
+// Кто делает запрос: Mini App в Telegram (initData) или мобильное приложение (session)
+function auth_(params) {
+  if (params.session) return verifySession_(params.session);
+  return verifyInitData_(params.initData || '');
+}
+
 function doGet(e) {
-  const user = verifyInitData_(e.parameter.initData || '');
+  const user = auth_(e.parameter);
   if (!user) return json_({ error: 'unauthorized' });
   if (e.parameter.action === 'progress') return json_(progressFor_(user.id));
   if (e.parameter.action === 'history') return json_(historyFor_(user.id));
@@ -68,10 +75,15 @@ function doPost(e) {
   } catch (err) {
     return json_({ error: 'bad request' });
   }
-  const user = verifyInitData_(body.initData || '');
+  // Вход в мобильное приложение: эти два шага выполняются до авторизации
+  if (body.action === 'newCode') return json_(newLoginCode_(body.secret));
+  if (body.action === 'claim') return json_(claimLoginCode_(body.code, body.secret));
+
+  const user = auth_(body);
   if (!user) return json_({ error: 'unauthorized' });
 
   const action = body.action || (body.weight ? 'weight' : '');
+  if (action === 'link') return json_(linkLoginCode_(user, body.code));
   if (action === 'weight') return json_(addWeight_(user, body.weight));
   if (action === 'log') return json_(addLog_(user, body.entries));
   if (action === 'hello') return json_(hello_(user));
@@ -292,6 +304,83 @@ function grantAccessToCurrentClients() {
     .map(c => [String(c[0]), now, DEFAULT_DAYS, 'перенос: ' + c[1]]);
   if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, PAY_HEADERS.length).setValues(rows);
   Logger.log('Выдан доступ клиентам: %s', rows.length);
+}
+
+// ================= Вход в мобильное приложение =================
+//
+// 1. Приложение просит код: newCode(secret) → 6 цифр, живут 10 минут.
+// 2. Клиентка открывает бота (Mini App), подтверждает код: link(initData, code) — так мы узнаём её Telegram.
+// 3. Приложение забирает пропуск: claim(code, secret) → session. Секрет знает только это приложение,
+//    поэтому чужой код забрать нельзя.
+// Пропуск (session) — подписанная строка «id.время.подпись», действует SESSION_DAYS дней.
+
+const LOGIN_CODE_SECONDS = 10 * 60;
+const SESSION_DAYS = 180;
+
+function newLoginCode_(secret) {
+  if (!secret || String(secret).length < 16) return { error: 'bad secret' };
+  const cache = CacheService.getScriptCache();
+  let code;
+  for (let i = 0; i < 10; i++) {
+    code = String(Math.floor(100000 + Math.random() * 900000));
+    if (!cache.get('login_' + code)) break;
+  }
+  cache.put('login_' + code, JSON.stringify({ secret: sha256Hex_(String(secret)) }), LOGIN_CODE_SECONDS);
+  return { code: code, expiresIn: LOGIN_CODE_SECONDS };
+}
+
+function linkLoginCode_(user, code) {
+  const cache = CacheService.getScriptCache();
+  code = String(code || '').replace(/\D/g, '');
+  const raw = cache.get('login_' + code);
+  if (!raw) return { error: 'code not found' };
+  const entry = JSON.parse(raw);
+  entry.user = { id: user.id, first_name: user.first_name || '', last_name: user.last_name || '', username: user.username || '' };
+  cache.put('login_' + code, JSON.stringify(entry), LOGIN_CODE_SECONDS);
+  return { ok: true };
+}
+
+function claimLoginCode_(code, secret) {
+  const cache = CacheService.getScriptCache();
+  const key = 'login_' + String(code || '').replace(/\D/g, '');
+  const raw = cache.get(key);
+  if (!raw) return { error: 'code not found' };
+  const entry = JSON.parse(raw);
+  if (entry.secret !== sha256Hex_(String(secret || ''))) return { error: 'bad secret' };
+  if (!entry.user) return { pending: true };   // ещё не подтвердили в Telegram
+  cache.remove(key);
+  return { session: makeSession_(entry.user), user: entry.user };
+}
+
+function sessionKey_() {
+  const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+  return Utilities.computeHmacSignature(Utilities.MacAlgorithm.HMAC_SHA_256, toBytes_(token), toBytes_('FitBalanceSession'));
+}
+
+function makeSession_(user) {
+  const payload = Utilities.base64EncodeWebSafe(JSON.stringify({
+    id: user.id, first_name: user.first_name, last_name: user.last_name, username: user.username,
+    iat: Math.floor(Date.now() / 1000)
+  }));
+  return payload + '.' + hex_(Utilities.computeHmacSignature(Utilities.MacAlgorithm.HMAC_SHA_256, toBytes_(payload), sessionKey_()));
+}
+
+function verifySession_(session) {
+  const parts = String(session).split('.');
+  if (parts.length !== 2) return null;
+  const expected = hex_(Utilities.computeHmacSignature(Utilities.MacAlgorithm.HMAC_SHA_256, toBytes_(parts[0]), sessionKey_()));
+  if (expected !== parts[1]) return null;
+  const user = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString());
+  if (Date.now() / 1000 - user.iat > SESSION_DAYS * 86400) return null;
+  return user;
+}
+
+function sha256Hex_(text) {
+  return hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, toBytes_(text)));
+}
+
+function hex_(bytes) {
+  return bytes.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
 }
 
 // ================= Напоминания =================

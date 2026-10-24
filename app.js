@@ -455,7 +455,7 @@ function setBackButton(visible) {
 
 // until — до какого момента оплачено (ISO); сервер присылает при каждом открытии приложения
 let access = { until: null };
-const FREE_SCREENS = new Set(['home', 'nutrition', 'profile', 'plan', 'recipe', 'pregnant', 'paywall', 'finish']);
+const FREE_SCREENS = new Set(['home', 'nutrition', 'profile', 'plan', 'recipe', 'pregnant', 'paywall', 'finish', 'link']);
 
 function hasAccess() {
     return !CONFIG.paywall || (!!access.until && new Date(access.until) > new Date());
@@ -676,6 +676,7 @@ const SCREENS = {
                 ${rowHtml({ emoji: '⚖️', title: 'Дневник веса', sub: 'Записать вес и посмотреть график', go: 'weight', id: '' })}
                 ${rowHtml({ emoji: '📊', title: 'Мой прогресс', sub: 'Графики веса тела и рабочих весов', go: 'progressAll', id: '' })}
                 <button class="row" data-action="coach"><span class="row-emoji">💬</span><span class="row-body"><div class="row-title">Написать тренеру</div></span><span class="row-arrow">›</span></button>
+                ${rowHtml({ emoji: '📱', title: 'Приложение Fit & Balance', sub: 'Вход в мобильное приложение по коду', go: 'link', id: '' })}
             </div>`;
     },
 
@@ -761,6 +762,47 @@ const SCREENS = {
                 go('exercise', { id, index: index + 1 }, true);
             }
         });
+    },
+
+    // Вход в мобильное приложение Fit & Balance: подтверждаем код, который показывает приложение
+    link({ id }) {
+        const code = String(id || '').replace(/\D/g, '').slice(0, 6);
+        app.innerHTML = `
+            <div class="finish">
+                <div class="finish-emoji">📱</div>
+                <h1>Вход в Fit & Balance</h1>
+                <p class="hint">Подтверди, что это ты входишь в мобильное приложение. Код показан на экране приложения.</p>
+            </div>
+            <form class="weight-form" id="link-form">
+                <input id="link-code" type="text" inputmode="numeric" maxlength="7" placeholder="Код из 6 цифр" value="${escapeHtml(code)}" autocomplete="one-time-code">
+            </form>
+            <div id="link-result"></div>`;
+
+        const submit = async () => {
+            const value = document.getElementById('link-code').value.replace(/\D/g, '');
+            const result = document.getElementById('link-result');
+            if (value.length !== 6) {
+                result.innerHTML = '<div class="message">Введи 6 цифр из приложения</div>';
+                return;
+            }
+            if (!apiEnabled) {
+                result.innerHTML = '<div class="message">Открой эту страницу через бота 🤖</div>';
+                return;
+            }
+            result.innerHTML = '<div class="message">Подтверждаю…</div>';
+            try {
+                await api('POST', { action: 'link', code: value });
+                haptic('success');
+                result.innerHTML = '<div class="message">✅ Готово! Вернись в приложение Fit & Balance — вход выполнится сам.</div>';
+                setMainButton('Вернуться в приложение', () => tg.close());
+            } catch (error) {
+                result.innerHTML = `<div class="message">${error.message === 'code not found'
+                    ? 'Код не найден или устарел. Нажми «Войти» в приложении ещё раз 🔄'
+                    : 'Не получилось подтвердить. Попробуй ещё раз 😢'}</div>`;
+            }
+        };
+        document.getElementById('link-form').addEventListener('submit', event => { event.preventDefault(); submit(); });
+        setMainButton('Подтвердить вход ✓', submit);
     },
 
     paywall() {
@@ -1406,7 +1448,8 @@ loadProgress().then(() => {
     // или ссылка t.me/Nina_fitbody_bot/app?startapp=weight
     const start = new URLSearchParams(location.search).get('open') || (inTelegram && tg.initDataUnsafe.start_param);
     home();
-    if (start === 'gift') go('workout', { id: 'gift' });
+    if (start && start.startsWith('link_')) go('link', { id: start.slice(5) });
+    else if (start === 'gift') go('workout', { id: 'gift' });
     else if (start === 'weight') go('weight');
     else if (start === 'nutrition' || start === 'day') go(start);
     else if (start && WORKOUTS[start]) go('workout', { id: start });
