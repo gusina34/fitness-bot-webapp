@@ -1,0 +1,3 @@
+requests
+# Chrome/Chromium должен быть установлен (рендер HTML-графики)
+# faster-whisper   # только если без Groq (локальная расшифровка)
